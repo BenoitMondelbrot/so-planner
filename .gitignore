@@ -36,6 +36,9 @@ src/so_planner/ui/index.backup.html
 src/so_planner/ui/index.before_recode.html
 src/so_planner/ui/index.html.bak
 
+# Unused package placeholder (removed from repo)
+src/so_planner/optimization/
+
 # Local helpers
 Invoke-RestMethod -Method Post -Uri.txt
 inspect_db.py
