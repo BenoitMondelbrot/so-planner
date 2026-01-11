@@ -24,6 +24,11 @@ machines.xlsx
 plan of sales*.xlsx
 stock.xlsx
 receipts.xlsx
+!BOM.xlsx
+!machines.xlsx
+!plan of sales.xlsx
+!stock.xlsx
+!receipts.xlsx
 milp*.xlsx
 
 # UI backups
