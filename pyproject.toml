@@ -1,0 +1,27 @@
+[project]
+name = "so-planner"
+version = "0.1.0"
+description = "Production planning with heuristics + MILP/GA, export & API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "matplotlib",
+  "numpy",
+  "openpyxl",
+  "ortools",
+  "pandas",
+  "pydantic",
+  "pydantic-settings",
+  "sqlalchemy",
+]
+
+[project.optional-dependencies]
+runtime = [
+  "python-dotenv",
+  "uvicorn",
+  "xlsxwriter",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["so_planner"]

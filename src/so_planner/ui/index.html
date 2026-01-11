@@ -1,0 +1,1895 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>S&O Planner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0f172a;
+      --panel:#111827;
+      --surface:#0b1220;
+      --topbar:#0b1328;
+      --muted:#94a3b8;
+      --text:#e5e7eb;
+      --accent:#60a5fa;
+      --accent-text:#0b1220;
+      --warn:#f97316;
+      --ok:#34d399;
+      --danger-bg:#7f1d1d;
+      --danger-border:#991b1b;
+      --danger-text:#fecaca;
+      --border-weak:rgba(255,255,255,.08);
+      --border:rgba(255,255,255,.12);
+      --border-strong:rgba(255,255,255,.28);
+      --timeline:#0a1020;
+      --labels-bg:#121a2c;
+      --header-bg:#0b1328;
+      --badge-base:#cbd5e1;
+      --badge-text:#0a1020;
+      --badge-root:#22d3ee;
+      --badge-root-text:#002b36;
+      --badge-child:#60a5fa;
+      --badge-child-text:#041524;
+      --bar-main-1:rgba(96,165,250,.22);
+      --bar-main-2:rgba(96,165,250,.45);
+      --bar-main-border:rgba(96,165,250,.55);
+      --bar-child-1:rgba(34,211,238,.18);
+      --bar-child-2:rgba(34,211,238,.40);
+      --bar-child-border:rgba(34,211,238,.55);
+      --highlight-row:rgba(96,165,250,.12);
+      --labels:280px; --headerh:28px; --dayw:18px; --rowh:28px;
+    }
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font:14px/1.4 Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;}
+    a{ color:var(--accent); text-decoration:none; }
+    .topbar{ display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border-weak); background:var(--topbar); position:sticky; top:0; z-index:8;}
+    .topbar h1{ font-size:16px; margin:0; }
+    .tabs{ display:flex; gap:8px; }
+    .tabbtn{ padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; }
+    .tabbtn.active{ border-color:var(--accent); color:var(--text); background:var(--panel); }
+    .page{ display:none; padding:16px; } .page.active{ display:block; }
+    .card{ background:var(--panel); border:1px solid var(--border-weak); border-radius:12px; padding:14px; margin-bottom:12px; }
+    .card h3{ margin:0 0 10px 0; font-size:15px; }
+    .row{ display:flex; gap:12px; flex-wrap:wrap; } .col{ flex:1 1 320px; }
+    .btn{ border:1px solid var(--border); background:var(--surface); color:var(--text); padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .btn:hover{ border-color: var(--border-strong); } .btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-text); }
+    .btn.danger{ background:var(--danger-bg); border-color:var(--danger-border); color:var(--danger-text); }
+    .btn[disabled], .btn.loading{ opacity:.6; cursor:progress; }
+    label{ font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+    input[type=text], input[type=number], input[type=date], input[type=file]{ width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text); }
+    select{ background:var(--surface) !important; color:var(--text) !important; border:1px solid var(--border) !important; border-radius:8px; padding:6px 8px; }
+    .kv{ display:grid; grid-template-columns: 180px 1fr; gap:6px 10px; font-size:13px; } .kv div{ padding:2px 0; }
+    .table-wrap{ overflow:auto; border:1px solid var(--border-weak); border-radius:10px; }
+    table{ border-collapse:collapse; width:100%; font-size:13px; } th,td{ padding:6px 8px; border-bottom:1px solid var(--border-weak); white-space:nowrap; }
+    table thead th{ position:sticky; top:0; background:var(--header-bg); z-index:1; }
+    table tbody th{ background:var(--surface); text-align:left; position:static; }
+    .log{ background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px; height:220px; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
+    .log .ok{ color:var(--ok); } .log .err{ color:var(--danger-text); } .mini{ color:var(--muted); font-size:12px; }
+    /* Theme switcher */
+    .theme-ctrl{ display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid var(--border-weak); border-radius:10px; background:var(--surface); }
+    .theme-ctrl .theme-swatch{ width:32px; height:14px; border-radius:999px; border:1px solid var(--border); box-shadow:0 0 0 1px var(--border-weak) inset; }
+    .theme-ctrl .theme-select{ min-width:160px; }
+    /* Gantt */
+    .gantt-wrap{ position: relative; display: grid; grid-template-columns: var(--labels) 1fr; height: 60vh; border:1px solid var(--border-weak); border-radius:12px; overflow:hidden;}
+    .labels{ overflow:auto; background:var(--labels-bg); border-right:1px solid var(--border-weak); }
+    .labels.hide-scrollbar{ -ms-overflow-style: none; scrollbar-width: none; }
+    .labels.hide-scrollbar::-webkit-scrollbar{ display:none; }
+    .l-header,.header{ position:sticky; top:0; z-index:3; height:var(--headerh); display:flex; align-items:center; padding:0 10px; background:var(--header-bg); border-bottom:1px solid var(--border-weak); color:var(--muted); font-size:12px; }
+    .timeline{ position:relative; overflow:auto; background:var(--timeline); }
+    .h-scale{ position: relative; height: var(--headerh); }
+    .tick{ position:absolute; bottom:0; border-left:1px solid var(--border-weak); height:100%; padding-left:4px; transform: translateX(-0.5px); }
+    .tick .lbl{ position:absolute; bottom:8px; }
+    .g-row{ display:grid; grid-template-columns: var(--labels) 1fr; height:var(--rowh); border-bottom:1px dashed var(--border-weak); }
+    .cell-label{ padding:0 10px; display:flex; gap:8px; align-items:center; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+    .cell-time{ position:relative; overflow:visible; }
+    .badge{ font-size:11px; color:var(--badge-text); background:var(--badge-base); border-radius:999px; padding:1px 6px; }
+    .badge.root{ background:var(--badge-root); color:var(--badge-root-text); } .badge.child{ background:var(--badge-child); color:var(--badge-child-text); }
+    .bar{ position:absolute; top: calc(50% - 9px); height:18px; display:flex; align-items:center; padding:0 6px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:10px; color:var(--text); background: linear-gradient(180deg, var(--bar-main-1), var(--bar-main-2)); border:1px solid var(--bar-main-border); border-radius:6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.2), 0 2px 8px rgba(0,0,0,.25); cursor:pointer; }
+    .bar .bar-text{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%; pointer-events:none; }
+    .bar.child{ background: linear-gradient(180deg, var(--bar-child-1), var(--bar-child-2)); border-color: var(--bar-child-border); }
+    .bar.late{ outline:2px solid var(--warn); }
+    .group-divider{ height:10px; background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02)); border-bottom:1px solid var(--border-weak); }
+    .today-line{ position:absolute; top:var(--headerh); bottom:0; width:2px; background: var(--accent); opacity:.65; z-index:2; display:none; }
+    .hint{ position:fixed; z-index:10; pointer-events:none; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:6px 8px; font-size:12px; color:var(--text); box-shadow:0 6px 24px rgba(0,0,0,.4); display:none; max-width:420px; }
+    table.heatmap-table{ border-collapse:collapse; width:100%; font-size:12px; }
+    table.heatmap-table th, table.heatmap-table td{ border:1px solid var(--border-weak); padding:4px 6px; text-align:center; }
+    table.heatmap-table th{ background:var(--header-bg); }
+    table.heatmap-table td{ min-width:52px; }
+    table.heatmap-table td .hm-val{ font-weight:600; color:var(--text); display:block; }
+    table.heatmap-table td.name-cell{ text-align:left; font-weight:600; background:var(--panel); min-width:140px; }
+    table.heatmap-table td.shop-cell{ text-align:left; background:var(--panel); min-width:120px; }
+    .bar.highlight{ box-shadow:0 0 0 2px var(--accent); border-color:var(--accent); }
+    .g-row.highlight-row{ background:var(--highlight-row); }
+    #edgesLayer path.highlight{ stroke:var(--accent); stroke-width:2; opacity:1; }
+  </style>
+  <script>
+    (function(){
+      const root = document.documentElement;
+      const presets = {
+        navy: {
+          label: 'Ночной · синий',
+          swatch: ['#0f172a', '#111827', '#60a5fa'],
+          vars: {
+            '--bg':'#0f172a','--panel':'#111827','--surface':'#0b1220','--topbar':'#0b1328','--muted':'#94a3b8','--text':'#e5e7eb','--accent':'#60a5fa','--accent-text':'#0b1220','--warn':'#f97316','--ok':'#34d399','--danger-bg':'#7f1d1d','--danger-border':'#991b1b','--danger-text':'#fecaca','--border-weak':'rgba(255,255,255,.08)','--border':'rgba(255,255,255,.12)','--border-strong':'rgba(255,255,255,.28)','--timeline':'#0a1020','--labels-bg':'#121a2c','--header-bg':'#0b1328','--badge-base':'#cbd5e1','--badge-text':'#0a1020','--badge-root':'#22d3ee','--badge-root-text':'#002b36','--badge-child':'#60a5fa','--badge-child-text':'#041524','--bar-main-1':'rgba(96,165,250,.22)','--bar-main-2':'rgba(96,165,250,.45)','--bar-main-border':'rgba(96,165,250,.55)','--bar-child-1':'rgba(34,211,238,.18)','--bar-child-2':'rgba(34,211,238,.40)','--bar-child-border':'rgba(34,211,238,.55)','--highlight-row':'rgba(96,165,250,.12)'
+          }
+        },
+        graphite: {
+          label: 'Графит + лайм',
+          swatch: ['#0c1117', '#121821', '#5eead4'],
+          vars: {
+            '--bg':'#0c1117','--panel':'#121821','--surface':'#0e141c','--topbar':'#101a24','--muted':'#8ba2b5','--text':'#e5eaee','--accent':'#5eead4','--accent-text':'#052022','--warn':'#fbbf24','--ok':'#34d399','--danger-bg':'#7f1d1d','--danger-border':'#b91c1c','--danger-text':'#fecdd3','--border-weak':'rgba(255,255,255,.07)','--border':'rgba(255,255,255,.14)','--border-strong':'rgba(255,255,255,.28)','--timeline':'#0a1119','--labels-bg':'#131b25','--header-bg':'#0f1b26','--badge-base':'#d4dce4','--badge-text':'#0b1220','--badge-root':'#5eead4','--badge-root-text':'#052022','--badge-child':'#67e8f9','--badge-child-text':'#022c36','--bar-main-1':'rgba(94,234,212,.18)','--bar-main-2':'rgba(94,234,212,.40)','--bar-main-border':'rgba(94,234,212,.60)','--bar-child-1':'rgba(103,232,249,.18)','--bar-child-2':'rgba(103,232,249,.42)','--bar-child-border':'rgba(103,232,249,.60)','--highlight-row':'rgba(94,234,212,.14)'
+          }
+        },
+        sunset: {
+          label: 'Тёплый закат',
+          swatch: ['#1a0f16', '#241827', '#fb7185'],
+          vars: {
+            '--bg':'#1a0f16','--panel':'#221522','--surface':'#241827','--topbar':'#2c1c2f','--muted':'#d6c4d6','--text':'#f8e7ff','--accent':'#fb7185','--accent-text':'#2e0c18','--warn':'#fb923c','--ok':'#86efac','--danger-bg':'#7f1d2b','--danger-border':'#b91c1c','--danger-text':'#ffe4e6','--border-weak':'rgba(255,255,255,.12)','--border':'rgba(255,255,255,.18)','--border-strong':'rgba(255,255,255,.32)','--timeline':'#1b1220','--labels-bg':'#201426','--header-bg':'#2c1c2f','--badge-base':'#f3d9e3','--badge-text':'#2d1020','--badge-root':'#fb7185','--badge-root-text':'#290b15','--badge-child':'#fbbf24','--badge-child-text':'#241400','--bar-main-1':'rgba(251,113,133,.18)','--bar-main-2':'rgba(251,113,133,.42)','--bar-main-border':'rgba(251,113,133,.60)','--bar-child-1':'rgba(251,191,36,.20)','--bar-child-2':'rgba(251,191,36,.44)','--bar-child-border':'rgba(251,191,36,.62)','--highlight-row':'rgba(251,113,133,.16)'
+          }
+        },
+        light: {
+          label: 'Светлый',
+          swatch: ['#f6f7fb', '#e7eaf1', '#2563eb'],
+          vars: {
+            '--bg':'#f6f7fb','--panel':'#ffffff','--surface':'#eef1f6','--topbar':'#e7eaf1','--muted':'#667085','--text':'#0f172a','--accent':'#2563eb','--accent-text':'#f8fafc','--warn':'#ea580c','--ok':'#16a34a','--danger-bg':'#fee2e2','--danger-border':'#fca5a5','--danger-text':'#7f1d1d','--border-weak':'rgba(15,23,42,.12)','--border':'rgba(15,23,42,.18)','--border-strong':'rgba(15,23,42,.32)','--timeline':'#f1f4f9','--labels-bg':'#edf0f6','--header-bg':'#e7eaf1','--badge-base':'#e2e8f0','--badge-text':'#0f172a','--badge-root':'#bfdbfe','--badge-root-text':'#0f172a','--badge-child':'#c7d2fe','--badge-child-text':'#0f172a','--bar-main-1':'rgba(37,99,235,.18)','--bar-main-2':'rgba(37,99,235,.38)','--bar-main-border':'rgba(37,99,235,.60)','--bar-child-1':'rgba(16,185,129,.18)','--bar-child-2':'rgba(16,185,129,.38)','--bar-child-border':'rgba(16,185,129,.60)','--highlight-row':'rgba(37,99,235,.12)'
+          }
+        }
+      };
+      const applyVars = (vars)=>{ Object.entries(vars||{}).forEach(([k,v])=> root.style.setProperty(k, v)); };
+      const save = (key)=>{ try{ localStorage.setItem('theme', key); }catch(e){} };
+      const load = ()=>{ try{ return localStorage.getItem('theme'); }catch(e){ return null; } };
+      const updateSwatch = (key)=>{
+        const sw = document.getElementById('themeSwatch');
+        const preset = presets[key];
+        if(sw && preset){
+          const colors = preset.swatch || [preset.vars['--bg'], preset.vars['--panel'], preset.vars['--accent']];
+          sw.style.background = `linear-gradient(90deg, ${colors.join(', ')})`;
+        }
+        const sel = document.getElementById('themeSelect');
+        if(sel && sel.value !== key) sel.value = key;
+      };
+      const applyTheme = (key)=>{
+        const preset = presets[key] || presets.navy;
+        applyVars(preset.vars);
+        root.dataset.theme = key;
+        save(key);
+        updateSwatch(key);
+      };
+      const initMenu = ()=>{
+        const sel = document.getElementById('themeSelect');
+        if(!sel) return;
+        sel.innerHTML='';
+        Object.entries(presets).forEach(([key,p])=>{
+          const opt=document.createElement('option');
+          opt.value=key;
+          opt.textContent=p.label;
+          sel.appendChild(opt);
+        });
+        const current = root.dataset.theme || load() || 'navy';
+        sel.value = presets[current] ? current : 'navy';
+        sel.addEventListener('change', ()=> applyTheme(sel.value));
+        updateSwatch(sel.value);
+      };
+      window.applyThemePreset = applyTheme;
+      window.themePresets = presets;
+      const initial = load();
+      applyTheme(initial && presets[initial] ? initial : 'navy');
+      if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMenu); else initMenu();
+    })();
+  </script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>S&O Planner</h1>
+        <div class="tabs">
+      <button class="tabbtn active" data-tab="files" onclick="window.activateTab && window.activateTab('files', this)">Файлы</button>
+      <button class="tabbtn" data-tab="netting" onclick="window.activateTab && window.activateTab('netting', this)">Неттинг</button>
+      <button class="tabbtn" data-tab="plans" onclick="window.activateTab && window.activateTab('plans', this)">Планы</button>
+      <button class="tabbtn" data-tab="reports" onclick="window.activateTab && window.activateTab('reports', this)">Отчёты</button>
+    </div>
+    <div style="flex:1"></div>
+    <div class="theme-ctrl">
+      <span class="mini">Тема</span>
+      <div class="theme-swatch" id="themeSwatch"></div>
+      <select id="themeSelect" class="theme-select"></select>
+    </div>
+    <a class="mini" href="/docs" target="_blank">/docs</a>
+  </div>
+
+  <script>
+    // Fallback tab wiring: ensures tabs work even if later scripts fail
+    (function(){
+      if(!window.activateTab){
+        window.activateTab = function(tid, btn){
+          try{
+            var target = document.getElementById(tid);
+            if(!target) return;
+            document.querySelectorAll('.tabbtn').forEach(function(el){
+              var isActive = (el===btn) || (el.dataset.tab===tid);
+              el.classList.toggle('active', !!isActive);
+            });
+            document.querySelectorAll('.page').forEach(function(p){
+              p.classList.toggle('active', p===target);
+            });
+          }catch(e){ /* no-op */ }
+        }
+      }
+      function setupTabs(){
+        if(window.__tabsInitialized) return;
+        window.__tabsInitialized = true;
+        var tabs = document.querySelector('.tabs');
+        if(tabs){
+          tabs.addEventListener('click', function(e){
+            var b = e.target.closest('.tabbtn'); if(!b) return;
+            e.preventDefault();
+            if(window.activateTab) window.activateTab(b.dataset.tab, b);
+          });
+        }
+        var initBtn = document.querySelector('.tabbtn.active') || document.querySelector('.tabbtn');
+        if(initBtn){ window.activateTab(initBtn.dataset.tab, initBtn); }
+      }
+      if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setupTabs); else setupTabs();
+    })();
+  </script>
+
+    <!-- Files: upload + mode + run + logs -->
+  <section id="files" class="page active">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>Загрузка исходных файлов</h3>
+          <div class="row">
+            <div class="col"><label>Оборудование (.xlsx)</label><input id="fMachines" type="file" accept=".xlsx,.xls" /></div>
+            <div class="col"><label>BOM (.xlsx)</label><input id="fBOM" type="file" accept=".xlsx,.xls" /></div>
+            <div class="col"><label>План продаж (.xlsx)</label><input id="fPlan" type="file" accept=".xlsx,.xls" /></div>
+          </div>
+          <div class="row" style="margin-top:6px;">
+            <div class="col"><label>Склад (.xlsx, опционально)</label><input id="fStock" type="file" accept=".xlsx,.xls" /></div>
+          </div>
+          <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <button class="btn" id="btnValidate">Проверить</button>
+            <button class="btn primary" id="btnUpload">Загрузить</button>
+            <span class="mini">Режим:</span>
+            <select id="selMode" style="padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
+              <option value="standard">Стандартный</option>
+              <option value="netting">Неттинг (Product View)</option>
+              <option value="standard_up">Standard-Up</option>
+            </select>
+            <button class="btn danger" id="btnStartCalc">Запустить расчёт</button>
+          </div>
+          <div class="row" style="margin-top:10px; gap:10px; align-items:flex-end;">
+            <div class="col" style="flex:0 0 260px;">
+              <label>Название плана</label>
+              <input type="text" id="filePlanName" placeholder="Например: Greedy из файлов" />
+            </div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;">
+              <button class="btn primary" id="btnSavePlanFiles">Сохранить</button>
+            </div>
+            <div class="col" style="flex:1 1 auto;">
+              <label>Статус плана</label>
+              <div id="filePlanStatus" class="mini"></div>
+            </div>
+          </div>
+          <div class="kv" style="margin-top:10px;" id="activePathsKV"></div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card"><h3>Журнал (короткий)</h3><div id="log" class="log"></div></div>
+        <div class="card"><h3>Журнал (подробный)</h3><div id="log2" class="log"></div></div>
+      </div>
+    </div>
+  </section>
+
+    <!-- Netting: DB-based run + browse -->
+  <section id="netting" class="page">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>Неттинг (Product View)</h3>
+          <div class="row">
+            <div class="col"><label>ID версии плана (необязательно)</label><input id="ng-plan" type="number" min="1" /></div>
+            <div class="col"><label>ID снимка склада</label><input id="ng-stock" type="number" min="1" /></div>
+            <div class="col">
+              <label>Приходы из</label>
+              <select id="ng-receipts" style="padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
+                <option value="plan">plan</option>
+                <option value="firmed">firmed</option>
+                <option value="both">both</option>
+                <option value="excel">excel</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button class="btn primary" id="btnRunGreedyJSON">Запустить (JSON)</button>
+            <div id="ng-meta" class="mini"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Последние запуски</h3>
+          <div class="row" style="align-items:flex-end; gap:8px;">
+            <div class="col"><label>Фильтр по плану</label><input id="nr-plan-filter" type="number" min="1" /></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnLoadRuns">Загрузить список</button></div>
+          </div>
+          <div class="table-wrap"><table id="tblRuns"></table></div>
+        </div>
+
+        <div class="card">
+          <h3>Результаты неттинга</h3>
+          <div class="row">
+            <div class="col"><label>ID запуска</label><input id="nr-id" type="number" min="1" /></div>
+            <div class="col"><label>Фильтр по изделию</label><input id="f-item" type="text" /></div>
+            <div class="col"><label>Цех</label><input id="f-wk" type="text" /></div>
+            <div class="col"><label>Дата с</label><input id="f-df" type="date" /></div>
+            <div class="col"><label>Дата по</label><input id="f-dt" type="date" /></div>
+          </div>
+          <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap;">
+            <button class="btn" id="btnLoadOrders">Заказы</button>
+            <button class="btn" id="btnLoadSummary">Сводка</button>
+            <button class="btn" id="btnLoadLog">Лог</button>
+          </div>
+          <div class="table-wrap"><table id="tblNetting"></table></div>
+        </div>
+
+        <div class="card">
+          <h3>Покрытие / приход</h3>
+          <div class="row">
+            <div class="col"><label>Изделие</label><input id="cov-item" type="text" /></div>
+            <div class="col"><label>Дата</label><input id="cov-date" type="date" /></div>
+            <div class="col"><label>Цех</label><input id="cov-wk" type="text" /></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnLoadCoverage">Показать покрытие</button></div>
+          </div>
+          <div id="cov-kv" class="kv" style="margin-top:8px;"></div>
+          <div class="table-wrap"><table id="tblCovReceipts"></table></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+    <!-- Plans: list + run greedy + heatmap -->
+  <section id="plans" class="page">
+    <div class="row">
+      <div class="col" style="flex:0 0 360px;">
+        <div class="card">
+          <h3>Создать версию плана</h3>
+          <div class="row">
+            <div class="col"><input type="text" id="planName" placeholder="Например: Greedy 2025-11-05"/></div>
+            <div class="col" style="flex:0 0 auto;"><button class="btn primary" id="btnCreate">Создать</button></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Сохранённые планы</h3>
+          <div class="plans" id="plansList"></div>
+          <div class="row" style="margin-top:8px; align-items:center;">
+            <button class="btn" id="btnRefreshPlans">Обновить список</button>
+            <div style="flex:1"></div>
+            <span class="mini" id="plansCount"></span>
+          </div>
+          <div class="mini" id="selInfo" style="margin-top:6px;"></div>
+        </div>
+
+        <div class="card">
+          <h3>Greedy для выбранного плана</h3>
+          <div class="row">
+            <button class="btn primary" id="btnRunGreedyPlan">Запустить Greedy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card"><h3>Тепловая карта плана</h3>
+          <div class="row" style="gap:8px; align-items:center; margin-bottom:8px;">
+            <div class="col" style="flex:0 0 200px;">
+              <label>Период</label>
+              <select id="hmMainPeriod" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
+                <option value="day" selected>Дни</option>
+                <option value="week">Недели</option>
+                <option value="month">Месяцы</option>
+              </select>
+            </div>
+          </div>
+          <div id="heatmap"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+    <!-- Reports: DB-based Gantt + Export -->
+  <section id="reports" class="page">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>Гантт (из БД)</h3>
+          <div class="row" style="gap:8px; align-items:center;">
+            <div class="col" style="flex:0 0 auto;"><label>Путь выгрузки</label><input id="exp-path" type="text" value="schedule_out.xlsx"/></div>
+            <div class="col" style="flex:0 0 220px;"><label>Артикул (начало order_id)</label><input id="repItem" type="text" list="repItemList" placeholder="например: 12345; можно несколько"/></div>
+            <datalist id="repItemList"></datalist>
+            <div class="col" style="flex:0 0 160px;"><label>Цех</label><input id="repWk" type="text" list="repWkList" placeholder="напр. Цех-1; можно несколько"/></div>
+            <datalist id="repWkList"></datalist>
+            <div class="col" style="flex:0 0 150px;"><label>Дата с</label><input id="repDf" type="date"/></div>
+            <div class="col" style="flex:0 0 150px;"><label>Дата по</label><input id="repDt" type="date"/></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnExportExcel">Выгрузить в Excel</button></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnReloadGantt">Обновить</button></div>
+            <div class="col" style="flex:1 1 auto;"></div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px;">
+              <button class="btn" id="btnToday">Сегодня</button>
+              <button class="btn" id="btnFit">Подогнать</button>
+            </div>
+          </div>
+          <div class="row" style="gap:8px; align-items:center; margin-top:6px;">
+            <div class="col" style="flex:0 0 auto; display:flex; gap:6px; align-items:center;">
+              <span class="mini">Масштаб</span>
+              <button class="btn" id="btnRepZoomIn">Приблизить</button>
+              <button class="btn" id="btnRepZoomOut">Отдалить</button>
+              <input type="range" id="repZoomSlider" min="0.25" max="6" step="0.25" value="1" style="width:140px;">
+              <span class="mini" id="repZoomValue">1.00x</span>
+            </div>
+          </div>
+          <div id="gantt" class="gantt-wrap">
+            <div class="labels">
+              <div class="l-header">Заказы</div>
+              <div id="lBody"></div>
+            </div>
+            <div class="timeline">
+              <div class="header" id="hScale"></div>
+              <div id="gBody"></div>
+              <svg id="edgesLayer" style="position:absolute; left:var(--labels); top:var(--headerh); width:calc(100% - var(--labels)); height:0; pointer-events:none;"></svg>
+              <div class="today-line" id="todayLine"></div>
+            </div>
+          <div id="hint" class="hint"></div>
+          </div>
+        </div>
+
+
+        <div class="card" style="margin-top:12px;">
+          <h3>Тепловая карта (отчёты)</h3>
+          <div class="row" style="gap:8px; align-items:center;">
+            <div class="col" style="flex:0 0 260px;"><label>План</label><select id="hmPlanSel" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col"><label>Станки</label><select id="hmMachinesSel" multiple size="1" style="width:100%; min-width:280px; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col" style="flex:0 0 180px;"><label>Период</label><select id="hmPeriodSel" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"><option value="day" selected>Дни</option><option value="week">Недели</option><option value="month">Месяцы</option></select></div>
+            <div class="col" style="flex:0 0 160px;"><label>Цех</label><input id="hmWk" type="text" list="hmWkList" placeholder="напр. Цех-1"/></div>
+            <datalist id="hmWkList"></datalist>
+            <div class="col" style="flex:0 0 150px;"><label>Дата с</label><input id="hmDf" type="date"/></div>
+            <div class="col" style="flex:0 0 150px;"><label>Дата по</label><input id="hmDt" type="date"/></div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;">
+              <button class="btn" id="btnHMPaste">Вставить из буфера</button>
+              <button class="btn" id="btnHMReset">Очистить</button>
+              <button class="btn primary" id="btnLoadHeatmapReport">Показать тепловую карту</button>
+            </div>
+          </div>
+          <div class="table-wrap" style="margin-top:10px;">
+            <div id="heatmapReport" style="padding:6px;"></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:12px;">
+          <h3>Заказы по станкам</h3>
+          <div class="row" style="gap:8px; align-items:center;">
+            <div class="col" style="flex:0 0 260px;"><label>План</label><select id="mgPlanSel" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col"><label>Станки</label><select id="mgMachinesSel" multiple size="1" style="width:100%; min-width:280px; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="col" style="flex:0 0 160px;"><label>Цех</label><input id="mgWk" type="text" list="mgWkList" placeholder="напр. Цех-1"/></div>
+            <datalist id="mgWkList"></datalist>
+            <div class="col" style="flex:0 0 150px;"><label>Дата с</label><input id="mgDf" type="date"/></div>
+            <div class="col" style="flex:0 0 150px;"><label>Дата по</label><input id="mgDt" type="date"/></div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn" id="btnMGPaste">Вставить из буфера</button>
+                <button class="btn" id="btnMGReset">Очистить</button>
+                <button class="btn primary" id="btnLoadMachineGantt">Показать Гант</button>
+              </div>
+              <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <span class="mini">Масштаб</span>
+                <button class="btn" id="btnMGZoomIn">Приблизить</button>
+                <button class="btn" id="btnMGZoomOut">Отдалить</button>
+                <input type="range" id="mgZoomSlider" min="0.25" max="6" step="0.25" value="1" style="width:160px;">
+                <span class="mini" id="mgZoomValue">1.00x</span>
+              </div>
+            </div>
+          </div>
+          <div id="mgGantt" class="gantt-wrap" style="height: 50vh;">
+            <div class="labels"><div class="l-header">Станки</div><div id="mgLBody"></div></div>
+            <div class="timeline">
+              <div class="header" id="mgHScale"></div>
+              <div id="mgBody"></div>
+              <div class="today-line" id="mgTodayLine"></div>
+            </div>
+            <div id="mgHint" class="hint"></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:12px;">
+          <h3>Гант по операциям (по заказу)</h3>
+          <div class="row" style="gap:8px; align-items:center;">
+            <div class="col" style="flex:0 0 220px;"><label>План</label><select id="orderPlanSel" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col" style="flex:0 0 280px;"><label>Заказ</label><input id="orderOrderId" type="text" placeholder="ID заказа"/></div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;">
+              <button class="btn primary" id="btnLoadOrderGantt">Показать</button>
+            </div>
+          </div>
+          <div class="row" style="gap:8px; align-items:center; margin-top:6px;">
+            <div class="col" style="flex:0 0 auto; display:flex; gap:6px; align-items:center;">
+              <span class="mini">Масштаб</span>
+              <button class="btn" id="btnOrderZoomIn">Приблизить</button>
+              <button class="btn" id="btnOrderZoomOut">Отдалить</button>
+              <input type="range" id="orderZoomSlider" min="0.25" max="6" step="0.25" value="1" style="width:140px;">
+              <span class="mini" id="orderZoomValue">1.00x</span>
+            </div>
+          </div>
+          <div id="orderOpsGantt" class="gantt-wrap" style="height: 50vh;">
+            <div class="labels"><div class="l-header">Станок</div><div id="orderGanttLabels"></div></div>
+            <div class="timeline">
+              <div class="header" id="orderGanttHeader"></div>
+              <div id="orderGanttBody"></div>
+              <div class="today-line" id="orderGanttToday"></div>
+            </div>
+            <div id="orderGanttHint" class="hint"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const toast = (msg, ok=false) => {
+      const t = el("log");
+      const ts = new Date().toLocaleTimeString();
+      t.innerHTML += `<div><span class="mini">${ts}</span> <span class="${ok?'ok':'err'}">${(typeof msg==='object')? JSON.stringify(msg,null,2): String(msg)}</span></div>`;
+      t.scrollTop = t.scrollHeight;
+    };
+    const log2 = (msg, ok=false) => {
+      const t = el("log2");
+      const ts = new Date().toLocaleTimeString();
+      t.innerHTML += `<div><span class="mini">${ts}</span> <span class="${ok?'ok':'err'}">${(typeof msg==='object')? JSON.stringify(msg,null,2): String(msg)}</span></div>`;
+      t.scrollTop = t.scrollHeight;
+    };
+
+    async function withLoading(btn, fn, label){
+      if(!btn) return fn();
+      const prev = btn.textContent;
+      btn.disabled = true;
+      if(label) btn.textContent = label;
+      btn.classList.add('loading');
+      try { return await fn(); }
+      finally { btn.disabled = false; btn.textContent = prev; btn.classList.remove('loading'); }
+    }
+    const setFilePlanStatus = (txt)=>{ const box = el("filePlanStatus"); if(box) box.textContent = txt || ""; };
+
+    // Sync vertical scroll between labels and timeline to act as one list
+    function setupGanttScrollSync(wrapperId){
+      const wrap = document.getElementById(wrapperId);
+      if(!wrap) return;
+      const labelsBox = wrap.querySelector('.labels');
+      const timelineBox = wrap.querySelector('.timeline');
+      if(!labelsBox || !timelineBox) return;
+      labelsBox.classList.add('hide-scrollbar');
+      let lock=false;
+      labelsBox.addEventListener('scroll', ()=>{ if(lock) return; lock=true; timelineBox.scrollTop = labelsBox.scrollTop; lock=false; });
+      timelineBox.addEventListener('scroll', ()=>{ if(lock) return; lock=true; labelsBox.scrollTop = timelineBox.scrollTop; lock=false; });
+      labelsBox.addEventListener('wheel', (e)=>{ if(e && typeof e.deltaY === 'number'){ e.preventDefault(); timelineBox.scrollTop += e.deltaY; } }, { passive:false });
+    }
+    window.state = { plans: [], selectedId: null };
+    try{ const _sp = localStorage.getItem('selectedPlanId'); if(_sp){ const _n=parseInt(_sp,10); if(Number.isFinite(_n)) window.state.selectedId=_n; } }catch(e){}
+    window.mgZoomFactor = window.mgZoomFactor || 1;
+    const machineLabel = (m) => {
+      if (!m) return "";
+      const name = m.name || m.id || "";
+      const workshop = m.workshop || "";
+      return workshop ? `${name} (${workshop})` : name;
+    };
+    const mixColor = (from, to, t) => {
+      const clamp = (v) => Math.max(0, Math.min(1, v));
+      t = clamp(t);
+      const fr = parseInt(from.slice(1,3),16), fg=parseInt(from.slice(3,5),16), fb=parseInt(from.slice(5,7),16);
+      const tr = parseInt(to.slice(1,3),16), tg=parseInt(to.slice(3,5),16), tb=parseInt(to.slice(5,7),16);
+    const rr = Math.round(fr + (tr-fr)*t).toString(16).padStart(2,'0');
+    const rg = Math.round(fg + (tg-fg)*t).toString(16).padStart(2,'0');
+    const rb = Math.round(fb + (tb-fb)*t).toString(16).padStart(2,'0');
+    return `#${rr}${rg}${rb}`;
+    };
+    // Shared tab activation helper, reused by inline handlers and dynamic buttons
+    const activate = window.activateTab = (tid, btn)=>{
+      if(!tid) return;
+      const target = document.getElementById(tid);
+      if(!target) return;
+      document.querySelectorAll('.tabbtn').forEach(el=>{
+        const isActive = el === btn || el.dataset.tab === tid;
+        el.classList.toggle('active', !!isActive);
+      });
+      document.querySelectorAll('.page').forEach(p=>{
+        p.classList.toggle('active', p === target);
+      });
+      try{ localStorage.setItem('activeTab', tid); }catch(e){}
+      // Auto-load Reports on activation
+      if(tid==='reports'){
+        try{
+          // Make sure plan lists exist for heatmap/machine-gantt
+          if((window.populatePlans||window.populatePlans===undefined) && typeof populatePlans==='function'){
+            populatePlans('hmPlanSel');
+            populatePlans('mgPlanSel');
+          } else if (typeof window.populatePlans==='function'){
+            window.populatePlans('hmPlanSel');
+            window.populatePlans('mgPlanSel');
+          }
+          // Fallback: copy from repPlanSel if still empty
+          ensurePlanOptionsFromRep('hmPlanSel');
+          ensurePlanOptionsFromRep('mgPlanSel');
+          // If a plan already selected, populate machines
+          const hmSel=document.getElementById('hmPlanSel');
+          if(hmSel && hmSel.value){ if(typeof window.populateMachinesFromPlan==='function') window.populateMachinesFromPlan('hmPlanSel','hmMachinesSel'); }
+          const mgSel=document.getElementById('mgPlanSel');
+          if(mgSel && mgSel.value){ if(typeof window.populateMachinesFromPlan==='function') window.populateMachinesFromPlan('mgPlanSel','mgMachinesSel'); }
+          if(window.populateRepWorkshops) window.populateRepWorkshops();
+          if(window.populateRepItems) window.populateRepItems();
+          if(window.computeRepFilters) window.computeRepFilters();
+          if(window.drawOrdersGantt) window.drawOrdersGantt();
+          if(window.loadHeatmapReport) window.loadHeatmapReport();
+        }catch(e){}
+      }
+    };
+
+    // Tabs (robust delegation to handle dynamic buttons too)
+    (function(){
+      if(window.__tabsInitialized) return; // early fallback already wired
+      window.__tabsInitialized = true;
+      const tabsBox = document.querySelector('.tabs');
+      
+      if(tabsBox){
+        tabsBox.addEventListener('click', (e)=>{
+          const b = e.target.closest('.tabbtn'); if(!b) return;
+          e.preventDefault();
+          const tid = b.dataset.tab; if(!tid) return;
+          activate(tid, b);
+        });
+        // Also bind existing buttons explicitly (robustness)
+        tabsBox.querySelectorAll('.tabbtn').forEach(b=>{
+          b.addEventListener('click', (e)=>{ e.preventDefault(); const tid=b.dataset.tab; if(tid) activate(tid,b); });
+        });
+      }
+      // Ensure initial state consistent
+      let initBtn = null;
+      try{
+        const saved = localStorage.getItem('activeTab');
+        if(saved){ initBtn = [...document.querySelectorAll('.tabbtn')].find(b=>b.dataset.tab===saved) || null; }
+      }catch(e){}
+      if(!initBtn) initBtn = document.querySelector('.tabbtn.active') || document.querySelector('.tabbtn');
+      if(initBtn){ activate(initBtn.dataset.tab, initBtn); }
+    })();
+
+    // Files: validate/upload
+    el('btnValidate').addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{
+        try {
+          const j = await fetch('/ingest/validate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ machines:'machines.xlsx', bom:'BOM.xlsx', plan:'plan of sales.xlsx' })}).then(r=>r.json());
+          el('activePathsKV').innerHTML='';
+          Object.entries(j||{}).forEach(([k,v])=>{ el('activePathsKV').innerHTML+=`<div>${k}</div><div>${v}</div>`; });
+          toast('Проверка: ок', true);
+        } catch(e){ toast('Ошибка проверки: '+(e.detail?.msg||e), false); }
+      }, 'Проверяю…');
+    });
+el('btnUpload').addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{
+        const fm=el('fMachines').files[0], fb=el('fBOM').files[0], fp=el('fPlan').files[0];
+        if(!fm||!fb||!fp){ toast('Загрузите все три файла: Оборудование, BOM, План продаж', false); return; }
+        try {
+          const fd=new FormData(); fd.append('machines', fm); fd.append('bom', fb); fd.append('plan', fp);
+          const j = await fetch('/upload/ingest',{method:'POST', body:fd}).then(r=>r.json());
+          if(j.active_paths){ el('activePathsKV').innerHTML=''; Object.entries(j.active_paths).forEach(([k,v])=>{ el('activePathsKV').innerHTML+=`<div>${k}</div><div>${v}</div>`; }); try{ window.lastUploadedPaths = j.active_paths; }catch(e){} }
+          toast('Загрузка: ок', true);
+        } catch(e){ toast('Ошибка загрузки: '+(e.detail?.msg||e), false); }
+      }, 'Загружаю…');
+    });
+
+    // Files: Start calc button
+    el('btnStartCalc').addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{
+        const mode = el('selMode').value;
+        try{
+          if(mode==='standard'){
+            const r = await fetch('/schedule/greedy?mode=', {method:'POST'}); const j = await r.json(); if(!r.ok) throw j; log2({standard:j}, true); toast('Greedy: ок (стандартный)', true);
+          } else {
+            const r = await fetch('/schedule/greedy?mode=product_view', {method:'POST'}); const j = await r.json(); if(!r.ok) throw j; log2({netting:j}, true); toast('Greedy: ок (неттинг)', true); if(j.plan_id) { window.state.selectedId = j.plan_id; try{ localStorage.setItem('selectedPlanId', String(j.plan_id)); }catch(e){} }
+          }
+        }catch(e){ log2('Ошибка запуска: '+(e.detail?.msg||e), false); toast('Greedy: ошибка', false); }
+      }, 'Считаю…');
+    });
+
+    // Netting
+    const tblRuns = el('tblRuns'); const tblNetting = el('tblNetting'); const covKV = el('cov-kv'); const tblCovReceipts = el('tblCovReceipts');
+    function toTable(tbl, rows){ if(!tbl) return; const data=Array.isArray(rows)?rows:[]; tbl.innerHTML=''; if(!data.length){ tbl.innerHTML='<thead><tr><th>Нет изменений</th></tr></thead>'; return; } const cols=[...data.reduce((s,r)=>{Object.keys(r).forEach(k=>s.add(k)); return s;}, new Set())]; const thead=document.createElement('thead'); const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th);}); thead.appendChild(trh); const tbody=document.createElement('tbody'); data.forEach(r=>{ const tr=document.createElement('tr'); cols.forEach(c=>{ const td=document.createElement('td'); let v=r[c]; if(v===undefined||v===null) v=''; td.textContent=String(v); tr.appendChild(td);}); tbody.appendChild(tr);}); tbl.appendChild(thead); tbl.appendChild(tbody);} 
+    function kv(root, obj){ if(!root) return; const o=obj||{}; root.innerHTML=''; Object.keys(o).forEach(k=>{ const kd=document.createElement('div'); kd.textContent=k; const vd=document.createElement('div'); vd.textContent=String(o[k]??''); root.appendChild(kd); root.appendChild(vd); }); }
+    /*
+    async function runGreedyJSON(){ const planRaw=el('ng-plan').value; const plan=planRaw?parseInt(planRaw,10):null; const stock=parseInt(el('ng-stock').value||'0',10); const receipts=el('ng-receipts').value||'plan'; if(!stock){ alert('Р В Р в‚¬Р В РЎвЂќР В Р’В°Р В Р’В¶Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Stock Snapshot'); return;} const payload={ plan_version_id:plan, stock_snapshot_id:stock, receipts_from:receipts }; const r=await fetch('/schedule/greedy_json',{method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}); const j=await r.json(); if(!r.ok){ alert('Р В РЎвЂєР РЋРІвЂљВ¬Р В РЎвЂР В Р’В±Р В РЎвЂќР В Р’В°: '+(j.detail?.msg||JSON.stringify(j))); return;} el('ng-meta').innerHTML = `rows: <b>${j.rows}</b> Р Р†Р вЂљРЎС› out: <b>${j.out}</b> Р Р†Р вЂљРЎС› plan_id: <b>${j.plan_id??''}</b>`; if(j.plan_id) window.state.selectedId=j.plan_id; }
+    */
+    // Safer version with clear RU messages
+    async function runGreedyJSON2(){
+      const planRaw=el('ng-plan').value; const plan=planRaw?parseInt(planRaw,10):null; const stock=parseInt(el('ng-stock').value||'0',10); const receipts=el('ng-receipts').value||'plan';
+      if(!stock){ alert('Укажите ID снимка склада'); return; }
+      const payload={ plan_version_id:plan, stock_snapshot_id:stock, receipts_from:receipts };
+      const r=await fetch('/schedule/greedy_json',{method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      const j=await r.json();
+      if(!r.ok){ alert('Ошибка выполнения: '+(j.detail?.msg||JSON.stringify(j))); return; }
+      el('ng-meta').innerHTML = `строк: <b>${j.rows}</b> · out: <b>${j.out}</b> · план: <b>${j.plan_id??''}</b>`;
+      if(j.plan_id){ window.state.selectedId=j.plan_id; try{ localStorage.setItem('selectedPlanId', String(j.plan_id)); }catch(e){} }
+    }
+    // Backward-compatible alias
+    // Backward-compatible alias; legacy implementation above is deprecated
+    function runGreedyJSON(){ return runGreedyJSON2(); }
+    el('btnRunGreedyJSON').addEventListener('click', (e)=>withLoading(e.currentTarget, runGreedyJSON2, 'Считаю…'));
+    async function loadRuns(){ const pv = el('nr-plan-filter').value; const url = pv ? `/netting/runs?plan_version_id=${encodeURIComponent(pv)}` : '/netting/runs'; const rows = await fetch(url).then(r=>r.json()); toTable(tblRuns, rows);} el('btnLoadRuns').addEventListener('click', loadRuns);
+    async function loadRunHead(){ const rid=parseInt(el('nr-id').value||'0',10); if(!rid) return; const head = await fetch(`/netting/runs/${rid}`).then(r=>r.json()); kv(el('nr-head'), {...head.head, ...head.counts}); }
+    async function loadOrders(){ await loadRunHead(); const rid=el('nr-id').value; if(!rid) return; const it=el('f-item').value||''; const wk=el('f-wk').value||''; const df=el('f-df').value||''; const dt=el('f-dt').value||''; const q=new URLSearchParams(); if(it) q.set('item_id',it); if(wk) q.set('workshop',wk); if(df) q.set('date_from',df); if(dt) q.set('date_to',dt); const rows = await fetch(`/netting/runs/${rid}/orders?`+q.toString()).then(r=>r.json()); toTable(tblNetting, rows); }
+    async function loadSummary(){ await loadRunHead(); const rid=el('nr-id').value; if(!rid) return; const it=el('f-item').value||''; const wk=el('f-wk').value||''; const q=new URLSearchParams(); if(it) q.set('item_id',it); if(wk) q.set('workshop',wk); const rows = await fetch(`/netting/runs/${rid}/summary?`+q.toString()).then(r=>r.json()); toTable(tblNetting, rows); }
+    async function loadLog(){ await loadRunHead(); const rid=el('nr-id').value; if(!rid) return; const it=el('f-item').value||''; const wk=el('f-wk').value||''; const df=el('f-df').value||''; const dt=el('f-dt').value||''; const q=new URLSearchParams(); if(it) q.set('item_id',it); if(wk) q.set('workshop',wk); if(df) q.set('date_from',df); if(dt) q.set('date_to',dt); const rows = await fetch(`/netting/runs/${rid}/log?`+q.toString()).then(r=>r.json()); toTable(tblNetting, rows); }
+    el('btnLoadOrders').addEventListener('click', loadOrders); el('btnLoadSummary').addEventListener('click', loadSummary); el('btnLoadLog').addEventListener('click', loadLog);
+    async function loadCoverage2(){
+      const rid=el('nr-id').value; if(!rid) return alert('Укажите ID запуска');
+      const it=el('cov-item').value.trim(); const dd=el('cov-date').value; const wk=el('cov-wk').value||'';
+      if(!it||!dd) return alert('Укажите item_id и дату (due_date)');
+      const q=new URLSearchParams({item_id:it, due_date:dd}); if(wk) q.set('workshop',wk);
+      const data=await fetch(`/netting/runs/${rid}/coverage?`+q.toString()).then(r=>r.json());
+      const kvData={"opening.exact":data.opening?.exact??0,"opening.generic":data.opening?.generic??0,"used.stock_exact":data.used?.stock_exact??0,"used.stock_generic":data.used?.stock_generic??0,"used.receipts":data.used?.receipts??0,"order_created":data.order_created??0,"available_after":data.available_after??0};
+      kv(covKV,kvData); toTable(tblCovReceipts, data.receipts_breakdown||[]);
+    }
+    el('btnLoadCoverage').addEventListener('click', loadCoverage2);
+
+    // Plans
+    const API = { plans:()=>fetch('/plans').then(r=>r.json()), runGreedy:(id)=>fetch(`/plans/${id}/run-greedy`,{method:'POST'}).then(r=>r.json()), heatmap:(id, params)=>{ const qs=params? new URLSearchParams(params).toString():''; const url = `/plans/${id}/heatmap` + (qs?`?${qs}`:''); return fetch(url).then(r=>r.json()); } };
+    function renderPlans(){ const box=el('plansList'); box.innerHTML=''; state.plans.forEach(p=>{ const div=document.createElement('div'); div.className='plan-item'+(p.id===state.selectedId?' active':''); div.onclick=()=>{ state.selectedId=p.id; try{ localStorage.setItem('selectedPlanId', String(p.id)); }catch(e){} renderPlans(); loadHeatmap(); }; const left=document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column'; const name=document.createElement('div'); name.textContent=p.name; const meta=document.createElement('div'); meta.className='mini'; meta.textContent=`#${p.id} · ${p.origin}`; left.appendChild(name); left.appendChild(meta); const badge=document.createElement('div'); badge.className='badge status '+(p.status||'ready'); badge.textContent=p.status; div.appendChild(left); div.appendChild(badge); box.appendChild(div); }); el('plansCount').textContent=`${state.plans.length} шт.`; const sel=state.plans.find(p=>p.id===state.selectedId); el('selInfo').textContent= sel? `#${sel.id} · ${sel.name} · ${sel.origin} · ${sel.status}`: 'Не выбран план'; }
+    async function reloadPlans(){ const data=await API.plans(); state.plans=data; if(!state.selectedId && data.length) state.selectedId=data[0].id; renderPlans(); }
+        async function loadHeatmap(){
+      const container = el('heatmap');
+      if(!container) return;
+      const id = state.selectedId;
+      if(!id){
+        container.innerHTML = '<div class="mini" style="padding:12px;">Выберите план, чтобы увидеть тепловую карту</div>';
+        return;
+      }
+      try{
+        const periodSel = el('hmMainPeriod');
+        const period = periodSel ? periodSel.value : 'day';
+        const df = (document.getElementById('hmDf')?.value||'');
+        const dt = (document.getElementById('hmDt')?.value||'');
+        const wkRaw=(document.getElementById('hmWk')?.value||'');
+        const wkSet=new Set(parseList(wkRaw).map(x=>x.toLowerCase()));
+        const res = await API.heatmap(id, { period });
+        const machines = res?.machines || [];
+        const dates = res?.dates || [];
+        const util = res?.util || {};
+        if(!machines.length){
+          container.innerHTML = '<div class="mini" style="padding:12px;">Не выбраны станки</div>';
+          return;
+        }
+        if(!dates.length){
+          container.innerHTML = '<div class="mini" style="padding:12px;">Нет данных</div>';
+          return;
+        }
+        const tbl = document.createElement('table');
+        tbl.className = 'heatmap-table';
+        const thead = document.createElement('thead');
+        const trh = document.createElement('tr');
+        const thMachine = document.createElement('th'); thMachine.textContent='Станок'; trh.appendChild(thMachine);
+        const thShop = document.createElement('th'); thShop.textContent='Цех'; trh.appendChild(thShop);
+        dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); });
+        thead.appendChild(trh); tbl.appendChild(thead);
+        const tbody=document.createElement('tbody');
+        machines.forEach(m=>{
+          const tr=document.createElement('tr');
+          const nameCell=document.createElement('td'); nameCell.className='name-cell'; nameCell.textContent=m.name||m.id; nameCell.title = machineLabel(m); tr.appendChild(nameCell);
+          const shopCell=document.createElement('td'); shopCell.className='shop-cell'; shopCell.textContent=m.workshop||'—'; shopCell.title = m.workshop||'—'; tr.appendChild(shopCell);
+          dates.forEach(d=>{
+            const key = `${m.id}|${d}`;
+            const u = Number(util[key] ?? 0);
+            const td=document.createElement('td');
+            const span=document.createElement('span'); span.className='hm-val'; span.textContent=`${(u*100).toFixed(0)}%`; td.appendChild(span);
+            let color='#000000';
+            if(u>0 && u<1) color = mixColor('#000000','#16a34a', Math.min(1, Math.max(0,u)));
+            if(u>=1 && u<2) color = mixColor('#16a34a','#ef4444', Math.min(1,u-1));
+            if(u>=2) color = '#ef4444';
+            td.style.background = color;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        tbl.appendChild(tbody);
+        container.innerHTML = '';
+        container.appendChild(tbl);
+      } catch(e){
+        container.innerHTML = '<div class="mini" style="padding:12px;">Ошибка загрузки тепловой карты</div>';
+        console.error(e);
+      }
+    }
+</script>
+
+<script>
+(function(){
+  const el = (id) => document.getElementById(id);
+  window.orderZoomFactor = window.orderZoomFactor || 1;
+  window.orderOpsCache = window.orderOpsCache || [];
+
+  function showHint(hintEl, evt, html){
+    if(!hintEl) return;
+    hintEl.innerHTML = html;
+    hintEl.style.left = (evt.clientX + 12) + 'px';
+    hintEl.style.top = (evt.clientY + 12) + 'px';
+    hintEl.style.display = 'block';
+  }
+  function hideHint(hintEl){
+    if(!hintEl) return;
+    hintEl.style.display = 'none';
+  }
+
+  function renderOrderGantt(ops){
+    const wrap = el('orderOpsGantt');
+    if(!wrap) return;
+    const bars = new Map(); // idx -> bar element
+    const relations = new Map(); // idx -> {parents:Set, children:Set}
+    const nodeList = [];
+    const labels = el('orderGanttLabels');
+    const body = el('orderGanttBody');
+    const header = el('orderGanttHeader');
+    const hint = el('orderGanttHint');
+    const todayLine = el('orderGanttToday');
+    if(labels) labels.innerHTML = '';
+    if(body) body.innerHTML = '';
+    if(header) header.innerHTML = '';
+    if(!ops || !ops.length){
+      if(body) body.innerHTML = '<div class="mini" style="padding:8px;">Нет данных</div>';
+      return;
+    }
+    const parse = (x)=> new Date(x);
+    const minStart = new Date(Math.min(...ops.map(o=>parse(o.start_ts).getTime())));
+    const maxEnd = new Date(Math.max(...ops.map(o=>parse(o.end_ts).getTime())));
+    const spanMs = Math.max(1, maxEnd.getTime() - minStart.getTime());
+    const zoom = window.orderZoomFactor || 1;
+    const HOUR_MS = 3600000;
+    const baseHourPx = 1.5;
+    const hourPx = baseHourPx * zoom;
+    const pxPerMs = hourPx / HOUR_MS;
+    const totalWidth = Math.max(600, spanMs * pxPerMs + 200);
+    // Set explicit widths so horizontal scrollbar appears when content is wide
+    if(header) header.style.width = `${Math.round(totalWidth)}px`;
+    if(body){
+      body.style.position = 'relative';
+      body.style.width = `${Math.round(totalWidth)}px`;
+    }
+
+    // header ticks (approx daily/12h)
+    const stepMs = spanMs > 7*24*3600*1000 ? 24*3600*1000 : (zoom >= 3 ? 6*3600*1000 : 12*3600*1000);
+    for(let t=minStart.getTime(); t<=maxEnd.getTime()+stepMs; t+=stepMs){
+      const tick = document.createElement('div');
+      tick.className = 'tick';
+      tick.style.left = `${(t - minStart.getTime()) * pxPerMs}px`;
+      const lbl = document.createElement('div');
+      lbl.className = 'lbl';
+      lbl.textContent = new Date(t).toLocaleString();
+      tick.appendChild(lbl);
+      header.appendChild(tick);
+    }
+
+    // group by machine
+    const byMachine = {};
+    ops.forEach(o=>{
+      const m = String(o.machine_id);
+      byMachine[m] = byMachine[m] || [];
+      byMachine[m].push(o);
+    });
+
+    const machines = Object.keys(byMachine).sort();
+    machines.forEach(mid=>{
+      const lab = document.createElement('div');
+      lab.className = 'cell-label';
+      lab.style.height = '24px';
+      lab.textContent = mid;
+      labels.appendChild(lab);
+
+      const row = document.createElement('div');
+      row.style.position = 'relative';
+      row.style.height = '24px';
+      row.style.width = `${totalWidth}px`;
+      const opsM = byMachine[mid].slice().sort((a,b)=> parse(a.start_ts) - parse(b.start_ts));
+      opsM.forEach((o, idx)=>{
+        const st = parse(o.start_ts);
+        const en = parse(o.end_ts);
+        const left = (st - minStart) * pxPerMs;
+        const width = Math.max(6, (en - st) * pxPerMs);
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.left = `${left+2}px`;
+        bar.style.width = `${width-4}px`;
+        bar.style.top = '2px';
+        const key = `${mid}_${idx}_${st.getTime()}`;
+        bars.set(key, bar);
+        relations.set(key, { parents:new Set(), children:new Set(), op_index: (o.op_index??0) });
+        const itemLabel = o.article_name || o.item_name || o.item_id || '';
+        if(itemLabel){
+          const span=document.createElement('span'); span.className='bar-text'; span.textContent=itemLabel; bar.appendChild(span);
+        }
+        const tip = `Заказ ${o.order_id}<br/>Номенклатура: ${itemLabel || o.item_id}<br/>Машина ${o.machine_id}<br/>Уровень ${o.op_index}<br/>${st.toLocaleString()} - ${en.toLocaleString()}`;
+        bar.dataset.orderKey = key;
+        bar.dataset.tip = tip;
+        nodeList.push({ key, op_index: Number(o.op_index||0), start_ms: st.getTime() });
+        row.appendChild(bar);
+      });
+      body.appendChild(row);
+      const sep=document.createElement('div');
+      sep.className='group-divider';
+      body.appendChild(sep);
+    });
+
+    // Build simple precedence by op_index across all ops (same order)
+    nodeList.sort((a,b)=> a.op_index - b.op_index || a.start_ms - b.start_ms);
+    for(let i=0; i<nodeList.length-1; i++){
+      const curKey = nodeList[i].key;
+      const nxtKey = nodeList[i+1].key;
+      if(relations.has(curKey) && relations.has(nxtKey)){
+        relations.get(curKey).children.add(nxtKey);
+        relations.get(nxtKey).parents.add(curKey);
+      }
+    }
+    const applyHighlight = (keySet)=>{
+      bars.forEach((bar,k)=>{ bar.classList.toggle('highlight', keySet.has(k)); });
+    };
+    bars.forEach((bar,k)=>{
+      const rel = relations.get(k);
+      const tip = bar.dataset.tip || '';
+      bar.addEventListener('mouseenter', (evt)=>{
+        const act = new Set([k]);
+        rel?.parents.forEach(p=>act.add(p));
+        rel?.children.forEach(c=>act.add(c));
+        applyHighlight(act);
+        const dataTip = bar.dataset.tip || '';
+        const finalTip = dataTip || tip;
+        showHint(hint, evt, finalTip);
+      });
+      bar.addEventListener('mousemove', (evt)=>{
+        const dataTip = bar.dataset.tip || '';
+        showHint(hint, evt, dataTip);
+      });
+      bar.addEventListener('mouseleave', ()=>{
+        applyHighlight(new Set());
+        hideHint(hint);
+      });
+    });
+
+    // today line
+    const now = new Date();
+    if(now >= minStart && now <= maxEnd){
+      const offsetPx = (now - minStart) * pxPerMs;
+      todayLine.style.left = `calc(var(--labels) + ${offsetPx}px)`;
+      todayLine.style.display = 'block';
+    } else if(todayLine){ todayLine.style.display='none'; }
+
+    setupGanttScrollSync('orderOpsGantt');
+  }
+
+  async function loadOrderOpsGantt(){
+    const planSel = el('orderPlanSel');
+    const orderInput = el('orderOrderId');
+    const planId = (planSel && planSel.value) ? planSel.value : (window.state?.selectedId || '');
+    const orderId = orderInput ? orderInput.value.trim() : '';
+    const wrap = el('orderOpsGantt');
+    if(!wrap) return;
+    if(!planId){ wrap.querySelector('#orderGanttBody').innerHTML = '<div class=\"mini\" style=\"padding:8px;\">Не выбран план</div>'; return; }
+    if(!orderId){ wrap.querySelector('#orderGanttBody').innerHTML = '<div class=\"mini\" style=\"padding:8px;\">Укажите заказ</div>'; return; }
+    try{
+      const ops = await fetch(`/plans/${encodeURIComponent(planId)}/orders/${encodeURIComponent(orderId)}/ops`).then(r=>r.json());
+      if(!ops || !ops.length){
+        wrap.querySelector('#orderGanttBody').innerHTML = '<div class=\"mini\" style=\"padding:8px;\">Нет операций</div>';
+        return;
+      }
+      window.orderOpsCache = ops;
+      renderOrderGantt(ops);
+    }catch(e){
+      wrap.querySelector('#orderGanttBody').innerHTML = '<div class=\"mini\" style=\"padding:8px;\">Ошибка загрузки</div>';
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    populatePlans('orderPlanSel');
+    ensurePlanOptionsFromRep('orderPlanSel');
+    const btn = el('btnLoadOrderGantt');
+    if(btn) btn.addEventListener('click', (e)=> withLoading(e.currentTarget, loadOrderOpsGantt, 'Загрузка'));
+    const orderSlider = el('orderZoomSlider');
+    const orderZoomValue = el('orderZoomValue');
+    const applyOrderZoom = (val)=>{
+      window.orderZoomFactor = Math.max(0.25, Math.min(6, val||1));
+      if(orderSlider) orderSlider.value = String(window.orderZoomFactor);
+      if(orderZoomValue) orderZoomValue.textContent = `${window.orderZoomFactor.toFixed(2)}x`;
+      // re-render cached ops without refetch
+      if(window.orderOpsCache && window.orderOpsCache.length){
+        renderOrderGantt(window.orderOpsCache);
+      } else {
+        loadOrderOpsGantt();
+      }
+    };
+    if(orderSlider){
+      orderSlider.value = String(window.orderZoomFactor||1);
+      orderSlider.addEventListener('input', ()=> applyOrderZoom(parseFloat(orderSlider.value)||1));
+    }
+    const orderZoomIn = el('btnOrderZoomIn'); if(orderZoomIn) orderZoomIn.addEventListener('click', ()=> applyOrderZoom((window.orderZoomFactor||1)+0.25));
+    const orderZoomOut = el('btnOrderZoomOut'); if(orderZoomOut) orderZoomOut.addEventListener('click', ()=> applyOrderZoom((window.orderZoomFactor||1)-0.25));
+  });
+})();
+</script>
+<script>
+  el('btnCreate').addEventListener('click', async (evt)=>{ const btn=evt.currentTarget; await withLoading(btn, async ()=>{ const name=el('planName').value.trim(); if(!name){ toast('Введите название плана', false); return;} const j=await fetch('/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}).then(r=>r.json()); await reloadPlans(); state.selectedId=j.id; try{ localStorage.setItem('selectedPlanId', String(j.id)); }catch(e){} await loadHeatmap(); }, 'Создаю…'); });
+  el('btnRefreshPlans').addEventListener('click', reloadPlans);
+  el('btnRunGreedyPlan').addEventListener('click', async (evt)=>{ const btn=evt.currentTarget; await withLoading(btn, async ()=>{ if(!state.selectedId){ toast('Не выбран план', false); return;} try{ const j=await API.runGreedy(state.selectedId); toast(`Greedy: ок (операций=${j.ops}, дней=${j.days})`, true); await loadHeatmap(); await reloadPlans(); }catch(e){ toast('Greedy: ошибка', false);} }, 'Запускаю…'); });
+
+  // Reports: Gantt + export
+  (()=>{
+      const DAY_MS = 86400000;
+      // Reports filters (item/workshop/date) globals used by drawOrdersGantt
+      let repDf = '', repDt = '';
+      let repWkSet = new Set();
+      let repItemSet = new Set();
+      function computeRepFilters(){
+        try{
+          repDf = (document.getElementById('repDf')?.value||'');
+          repDt = (document.getElementById('repDt')?.value||'');
+          const wkRaw = (document.getElementById('repWk')?.value||'');
+          const itRaw = (document.getElementById('repItem')?.value||'');
+          const parseListLocal = (text)=> Array.from(new Set(String(text||'').replace(/\r/g,'\n').split(/\n|\t|,|;|\s{2,}/).map(s=>s.trim()).filter(Boolean)));
+          const normalizeWkLocal = (text)=>{
+            const base = parseListLocal(text).map(s=>s.toLowerCase());
+            const out = new Set(base);
+            base.forEach((t)=>{ const digits = String(t).replace(/\D+/g,''); if(digits) out.add(digits); });
+            return out;
+          };
+          // ВАЖНО: не понижаем регистр для кириллицы - SQLite lower() не работает для не-ASCII
+          repWkSet = (window.normalizeWorkshopTokens ? window.normalizeWorkshopTokens(wkRaw) : normalizeWkLocal(wkRaw));
+          repItemSet = new Set(parseListLocal(itRaw).map(x=>x.toLowerCase()));
+        }catch(e){ repDf=''; repDt=''; repWkSet = new Set(); repItemSet = new Set(); }
+      }
+      window.computeRepFilters = computeRepFilters;
+
+      async function populateRepWorkshops(){
+        try{
+          const sel = document.getElementById('repPlanSel');
+          const pid = sel && sel.value ? parseInt(sel.value,10) : null;
+          const list = document.getElementById('repWkList');
+          if(!list || !pid) return;
+          const meta = await fetch(`/plans/${pid}/heatmap?period=day`).then(r=>r.json());
+          const wks = Array.from(new Set((meta?.machines||[]).map(m=> String(m.workshop||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b, 'ru'));
+          list.innerHTML='';
+          wks.forEach(w=>{ const o=document.createElement('option'); o.value=w; list.appendChild(o); });
+        }catch(e){ /* ignore */ }
+      }
+      window.populateRepWorkshops = populateRepWorkshops;
+
+      async function populateRepItems(){
+        try{
+          const sel = document.getElementById('repPlanSel');
+          const pid = sel && sel.value ? parseInt(sel.value,10) : null;
+          const list = document.getElementById('repItemList');
+          if(!list || !pid) return;
+          const tl = await fetch(`/reports/plans/${pid}/orders_timeline`).then(r=>r.json());
+          const items = Array.from(new Set(((tl?.orders)||[]).map(o=>{
+            const oid = String(o.order_id||'');
+            if(oid.includes(':')) return oid.split(':',1)[0].trim();
+            // if API already provides base_order_id, prefer it
+            const bo = String(o.base_order_id||'').trim();
+            return bo || oid;
+          }).filter(Boolean))).sort((a,b)=> a.localeCompare(b,'ru'));
+          list.innerHTML='';
+          items.forEach(v=>{ const o=document.createElement('option'); o.value=v; list.appendChild(o); });
+        }catch(e){ /* ignore */ }
+      }
+      window.populateRepItems = populateRepItems;
+      const toDate = (x)=> new Date(`${x}T00:00:00`);
+      const refs = { wrapper: el('gantt'), gBody: el('gBody'), lBody: el('lBody'), hScale: el('hScale'), edgesLayer: el('edgesLayer'), todayLine: el('todayLine'), hint: el('hint') };
+      const keyOf = (base, item) => `${base}|${item}`;
+      const showHint = (evt, html)=>{ if(!refs.hint) return; refs.hint.innerHTML=html; refs.hint.style.display='block'; refs.hint.style.left=`${evt.clientX + 12}px`; refs.hint.style.top=`${evt.clientY - 12}px`; };
+      const hideHint = ()=>{ if(refs.hint) refs.hint.style.display='none'; };
+      const ensureRelation = (map, base, item)=>{ const key = keyOf(base, item); if(!map.has(key)) map.set(key,{parents:new Set(), children:new Set()}); return { key, entry: map.get(key) }; };
+      const buildRelations = (edges)=>{ const rel=new Map(); (edges||[]).forEach(e=>{ const parentKey=keyOf(e.base_order_id, e.parent_item); const childKey=keyOf(e.base_order_id, e.child_item); ensureRelation(rel, e.base_order_id, e.parent_item).entry.children.add(childKey); ensureRelation(rel, e.base_order_id, e.child_item).entry.parents.add(parentKey); }); return rel; };
+      const groupByBase = (orders)=>{ const m=new Map(); (orders||[]).forEach(o=>{ const base=o.base_order_id || (o.order_id&&o.order_id.includes(':')? o.order_id.split(':',1)[0]:o.order_id); if(!m.has(base)) m.set(base,[]); m.get(base).push(o); }); return m; };
+      function topoSortGroup(rows, base, edges){ const items=new Map(rows.map(r=>[r.item_id,r])); const adj=new Map(); const indeg=new Map(); items.forEach((_,id)=>{ adj.set(id,new Set()); indeg.set(id,0); }); (edges||[]).forEach(e=>{ if(e.base_order_id!==base) return; if(items.has(e.parent_item)&&items.has(e.child_item)){ if(!adj.get(e.parent_item).has(e.child_item)){ adj.get(e.parent_item).add(e.child_item); indeg.set(e.child_item,(indeg.get(e.child_item)||0)+1); } } }); const queue=[... [...indeg.entries()].filter(([,deg])=>deg===0).map(([id])=>id)]; queue.sort((a,b)=> toDate(items.get(b).finish_date) - toDate(items.get(a).finish_date)); const ordered=[]; while(queue.length){ const id=queue.shift(); ordered.push(items.get(id)); adj.get(id).forEach(next=>{ indeg.set(next,(indeg.get(next)||0)-1); if(indeg.get(next)===0){ let i=0; while(i<queue.length && toDate(items.get(queue[i]).finish_date)>toDate(items.get(next).finish_date)) i++; queue.splice(i,0,next); } }); } if(ordered.length<rows.length){ const seen=new Set(ordered.map(r=>r.item_id)); rows.filter(r=>!seen.has(r.item_id)).sort((a,b)=> toDate(a.finish_date)-toDate(b.finish_date) || toDate(a.start_date)-toDate(b.start_date)).forEach(r=>ordered.push(r)); } return ordered; }
+      const computeChain = (relations, startKey)=>{ const visited=new Set(); const visitUp=(key)=>{ if(!key||visited.has(key)) return; visited.add(key); const rel=relations.get(key); if(rel) rel.parents.forEach(visitUp); }; const visitDown=(key)=>{ const rel=relations.get(key); if(rel) rel.children.forEach(child=>{ if(!visited.has(child)){ visited.add(child); visitDown(child); } }); }; visitUp(startKey); visitDown(startKey); return visited; };
+      const highlightState = { bars:new Map(), rows:new Map(), edges:[], relations:new Map(), active:new Set() };
+      // Date helpers for orders Gantt
+      // Local strict date normalizer (avoid name clash with earlier helper)
+      function toDateStrict(x){ if(!x) return new Date(NaN); const d=new Date(x); if(isNaN(d)) return new Date(NaN); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+      const applyHighlight = (keys)=>{ highlightState.active.forEach(key=>{ const bar=highlightState.bars.get(key); if(bar) bar.classList.remove('highlight'); const row=highlightState.rows.get(key); if(row){ row.label.classList.remove('highlight-row'); row.time.classList.remove('highlight-row'); } }); highlightState.edges.forEach(edge=>edge.classList.remove('highlight')); highlightState.active=keys; keys.forEach(key=>{ const bar=highlightState.bars.get(key); if(bar) bar.classList.add('highlight'); const row=highlightState.rows.get(key); if(row){ row.label.classList.add('highlight-row'); row.time.classList.add('highlight-row'); } }); highlightState.edges.forEach(edge=>{ if(keys.has(edge.dataset.parent) && keys.has(edge.dataset.child)){ edge.classList.add('highlight'); } }); };
+      async function drawOrdersGantt(){
+        try{
+          const planSel=document.getElementById('repPlanSel');
+          const pid = (planSel && planSel.value) ? parseInt(planSel.value,10) : null;
+          if(!pid){ console.warn('Нет выбранного плана'); return; }
+          console.debug('[Reports] plan_id=', pid);
+          const qsWk = new URLSearchParams();
+          if(repWkSet && repWkSet.size){ repWkSet.forEach(w=> qsWk.append('workshops', w)); }
+          const wkQuery = qsWk.toString();
+          const wkSuffix = wkQuery ? `?${wkQuery}` : '';
+          const [timelineResp, edgesResp] = await Promise.all([
+            fetch(`/reports/plans/${pid}/orders_timeline${wkSuffix}`),
+            fetch(`/reports/plans/${pid}/edges${wkSuffix}`)
+          ]);
+          const timeline = await timelineResp.json();
+          if(timeline.status!=='ok'){ console.error('[Reports] timeline error', timeline); return; }
+          let orders = Array.isArray(timeline.orders)? timeline.orders: [];
+          console.debug('[Reports] orders=', orders.length);
+          if(typeof repDf==='string' || typeof repDt==='string'){
+            const df = repDf||''; const dt=repDt||'';
+            if(df||dt) orders = orders.filter(o=> (!df || o.finish_date >= df) && (!dt || o.start_date <= dt));
+          }
+          if(repItemSet && repItemSet.size){
+            orders = orders.filter(o=>{
+              const oid = String(o.order_id||'').toLowerCase();
+              const base = String(o.base_order_id || (o.order_id&&o.order_id.includes(':')? o.order_id.split(':',1)[0]: o.order_id) || '').toLowerCase();
+              for(const token of repItemSet){
+                if(!token) continue;
+                if(base===token) return true; // точное совпадение по базовому артикулу
+                if(oid.includes(token)) return true; // мягкий поиск по order_id
+              }
+              return false;
+            });
+          }
+          if(repWkSet && repWkSet.size){
+            const allow = await fetch(`/reports/plans/${pid}/orders_by_workshop?`+wkQuery).then(r=>r.json()).catch(()=>null);
+            const allowed = new Set(((allow&&allow.order_ids)||[]).map(x=> String(x)));
+            orders = orders.filter(o=> allowed.has(String(o.order_id)));
+          }
+          const edgesJson = edgesResp.ok ? await edgesResp.json():null;
+          const edges = edgesJson&&edgesJson.status==='ok'?(edgesJson.edges||[]):[];
+          const { wrapper, gBody, lBody, hScale, edgesLayer, todayLine } = refs;
+          if(!orders.length){
+            if(wrapper) wrapper.style.display='none';
+            if(todayLine) todayLine.style.display='none';
+            console.debug('[Reports] no orders after filters');
+            return;
+          }
+          if(wrapper) wrapper.style.display='grid';
+          gBody.innerHTML=''; lBody.innerHTML=''; hScale.innerHTML=''; edgesLayer.innerHTML='';
+          const baseDayW=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--dayw'))||18;
+          const dayW = baseDayW * (window.repZoomFactor || 1);
+          const rowH=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--rowh'))||28;
+          gBody.style.position='relative'; lBody.style.position='relative';
+          const toD = (x)=> new Date(`${x}T00:00:00`);
+          const minStart=orders.reduce((m,o)=>!m||toD(o.start_date)<m?toD(o.start_date):m,null);
+          const maxFinish=orders.reduce((m,o)=>!m||toD(o.finish_date)>m?toD(o.finish_date):m,null);
+          const totalDays=Math.max(1, Math.round((maxFinish-minStart)/86400000)+1);
+          const timelineWidth=totalDays*dayW; gBody.style.width=`${timelineWidth}px`; hScale.style.width=`${timelineWidth}px`; edgesLayer.setAttribute('width', timelineWidth);
+          const relations=buildRelations(edges);
+          highlightState.bars=new Map(); highlightState.rows=new Map(); highlightState.edges=[]; highlightState.relations=relations; highlightState.active=new Set();
+          for(let i=0;i<=totalDays;i++){
+            const tick=document.createElement('div'); tick.className='tick'; tick.style.left=`${i*dayW}px`;
+            const cur = new Date(minStart.getTime()+i*86400000);
+            if(i===0 || cur.getDay()===1 || cur.getDate()===1){ const lbl=document.createElement('div'); lbl.className='lbl'; lbl.textContent=cur.toISOString().slice(0,10); tick.appendChild(lbl); }
+            hScale.appendChild(tick);
+          }
+          if(todayLine){ const today=new Date(); if(today>=minStart && today<=maxFinish){ const offset=Math.round((toD(today.toISOString().slice(0,10))-minStart)/86400000)*dayW; todayLine.style.left=`calc(var(--labels) + ${Math.max(0,offset)}px)`; todayLine.style.display='block'; } else { todayLine.style.display='none'; } }
+          const ordered=[]; const groups=groupByBase(orders); for(const [base,rows] of groups.entries()){ const sorted=topoSortGroup(rows, base, edges); ordered.push({type:'divider'}); sorted.forEach(r=>ordered.push({...r, __base: base})); } if(ordered.length && ordered[0].type==='divider') ordered.shift();
+          let rowIndex=0; const pos=new Map();
+          for(const entry of ordered){
+            if(entry.type==='divider'){ const div=document.createElement('div'); div.className='group-divider'; lBody.appendChild(div.cloneNode(true)); gBody.appendChild(div.cloneNode(true)); continue; }
+            const baseId=entry.__base || entry.base_order_id || entry.order_id; const itemId=entry.item_id || entry.order_id; const key=keyOf(baseId, itemId); ensureRelation(relations, baseId, itemId);
+            const role=entry.order_id && entry.order_id.includes(':')?'child':'root'; const roleLabel=role==='child'?'Дочерний':'Основной';
+            const labelRow=document.createElement('div'); labelRow.className='cell-label'; labelRow.style.display='flex'; labelRow.style.alignItems='center'; labelRow.style.gap='8px'; labelRow.style.height=`${rowH}px`;
+            labelRow.innerHTML=`<span class=\"mini\">Тип:</span><span class=\"badge ${role}\">${roleLabel}</span><span>${entry.order_id}</span><span class=\"mini\" style=\"margin-left:auto;\">${entry.start_date} — ${entry.finish_date} (${entry.duration_days} дн.) · срок: ${entry.due_date??'—'}</span>`;
+            lBody.appendChild(labelRow);
+            const timeRow=document.createElement('div'); timeRow.className='cell-time'; timeRow.style.position='relative'; timeRow.style.height=`${rowH}px`;
+            const startDays=Math.max(0, Math.round((toD(entry.start_date)-minStart)/86400000)); const durationDays=Math.max(1, Math.round((toD(entry.finish_date)-toD(entry.start_date))/86400000)+1);
+            const x0=startDays*dayW; const w=Math.max(6, durationDays*dayW); const bar=document.createElement('div'); bar.className=`bar ${role}`; bar.style.left=`${x0+2}px`; bar.style.width=`${w-4}px`;
+            if(entry.due_date && toD(entry.finish_date)>toD(entry.due_date)) bar.classList.add('late');
+            const itemLabel = entry.article_name || entry.item_name || entry.item_id || '';
+            if(itemLabel){
+              const span=document.createElement('span'); span.className='bar-text'; span.textContent=itemLabel; bar.appendChild(span);
+            }
+            const tooltip=`Заказ <b>${entry.order_id}</b><br/>Номенклатура: ${itemLabel || entry.item_id}<br/>${entry.start_date} - ${entry.finish_date} (${entry.duration_days} дн.)<br/>Срок: ${entry.due_date??'-'} · отклонение: ${entry.finish_lag??'-'}`;
+            timeRow.appendChild(bar); gBody.appendChild(timeRow);
+            const y=rowIndex*rowH + Math.floor(rowH/2); pos.set(key, { x0, x1:x0+w, y }); highlightState.bars.set(key, bar); highlightState.rows.set(key, { label:labelRow, time:timeRow });
+            const highlightKeys=()=>computeChain(relations, key);
+            bar.addEventListener('mouseenter', (evt)=>{ applyHighlight(highlightKeys()); showHint(evt, tooltip); });
+            bar.addEventListener('mousemove', (evt)=>showHint(evt, tooltip));
+            bar.addEventListener('mouseleave', ()=>{ applyHighlight(new Set()); hideHint(); });
+            labelRow.addEventListener('mouseenter', ()=>applyHighlight(highlightKeys()));
+            labelRow.addEventListener('mouseleave', ()=>applyHighlight(new Set()));
+            rowIndex++;
+          }
+          const totalH=rowIndex*rowH; gBody.style.height=`${totalH}px`; lBody.style.height=`${totalH}px`; edgesLayer.setAttribute('height', totalH);
+          highlightState.edges=[]; edges.forEach(e=>{ const parentKey=keyOf(e.base_order_id, e.parent_item); const childKey=keyOf(e.base_order_id, e.child_item); const parentPos=pos.get(parentKey); const childPos=pos.get(childKey); if(!parentPos||!childPos) return; const path=document.createElementNS('http://www.w3.org/2000/svg','path'); const mid=parentPos.x1 + Math.max(20, Math.min(80, (childPos.x0-parentPos.x1)/2)); path.setAttribute('d', `M ${parentPos.x1} ${parentPos.y} C ${parentPos.x1+20} ${parentPos.y}, ${mid-20} ${childPos.y}, ${childPos.x0} ${childPos.y}`); path.setAttribute('fill','none'); path.setAttribute('stroke','#64748b'); path.setAttribute('stroke-width','1.5'); path.setAttribute('opacity','0.85'); path.dataset.parent=parentKey; path.dataset.child=childKey; edgesLayer.appendChild(path); highlightState.edges.push(path); });
+        }catch(err){ console.error('[Reports] draw error', err); }
+      }
+      window.repZoomFactor = window.repZoomFactor || 1;
+      const repSlider = el('repZoomSlider');
+      const repZoomValue = el('repZoomValue');
+      const applyRepZoom = (val)=>{
+        window.repZoomFactor = Math.max(0.25, Math.min(6, val||1));
+        if(repSlider) repSlider.value = String(window.repZoomFactor);
+        if(repZoomValue) repZoomValue.textContent = `${window.repZoomFactor.toFixed(2)}x`;
+        drawOrdersGantt();
+      };
+      if(repSlider){
+        repSlider.value = String(window.repZoomFactor);
+        repSlider.addEventListener('input', ()=> applyRepZoom(parseFloat(repSlider.value)||1));
+      }
+      if(repZoomValue) repZoomValue.textContent = `${(window.repZoomFactor||1).toFixed(2)}x`;
+      const repZoomIn = el('btnRepZoomIn'); if(repZoomIn) repZoomIn.addEventListener('click', ()=> applyRepZoom((window.repZoomFactor||1)+0.25));
+      const repZoomOut = el('btnRepZoomOut'); if(repZoomOut) repZoomOut.addEventListener('click', ()=> applyRepZoom((window.repZoomFactor||1)-0.25));
+
+      window.drawOrdersGantt = drawOrdersGantt;
+      const reloadBtn=el('btnReloadGantt'); if(reloadBtn) reloadBtn.addEventListener('click', (e)=> withLoading(e.currentTarget, async ()=>{ computeRepFilters(); await drawOrdersGantt(); }, 'Обновляю…'));
+      const btnToday=el('btnToday'); if(btnToday){ btnToday.addEventListener('click', ()=>{ const tl=document.querySelector('#gantt .timeline'); const left=parseInt(String(refs.todayLine?.style.left||'0').replace('calc(var(--labels) + ','').replace('px)',''))||0; tl.scrollLeft=Math.max(0,left-200); }); }
+      const btnFit=el('btnFit'); if(btnFit){ btnFit.addEventListener('click', ()=>{ const tl=document.querySelector('#gantt .timeline'); tl.scrollLeft=0; }); }
+    })();
+
+    const __btnExp = el('btnExportExcel'); if(__btnExp) __btnExp.addEventListener('click', (evt)=> withLoading(evt.currentTarget, async ()=>{
+      try{
+        const out = el('exp-path').value || 'schedule_out.xlsx';
+        const planSel = document.getElementById('repPlanSel');
+        const planId = planSel && planSel.value ? parseInt(planSel.value, 10) : (window.state && window.state.selectedId) || null;
+        const body = { out_path: out };
+        if(planId) body.plan_id = planId;
+        const j = await fetch('/export', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r=>r.json());
+        alert('Экспорт: '+(j.status||'ok')+'\n'+(j.xlsx||''));
+      } catch(e){ alert('Export error'); }
+    }, 'Экспорт…'));
+
+    // init
+    (async ()=>{ await reloadPlans(); await loadHeatmap(); const p=el('hmMainPeriod'); if(p) p.addEventListener('change', loadHeatmap); })();
+  </script>
+<script>
+
+
+ </script>
+
+<script>
+// === Enhance Optimization page: horizon, makespan, smoothing; diff + heatmap ===
+(function(){
+  const el = (id) => document.getElementById(id);
+  const api = {
+    plans: async ()=> (await fetch('/plans')).json(),
+    optimizeFrom: async (id, body)=> (await fetch(`/optimize/from-plan/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    optimizeDiff: async (id, body)=> (await fetch(`/optimize/diff/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    jobshopFrom: async (id, body)=> (await fetch(`/optimize/jobshop/from-plan/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    jobshopDiff: async (id, body)=> (await fetch(`/optimize/jobshop/diff/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+  };
+
+  function ensureOptTab(){
+    const tabs = document.querySelector('.tabs'); if(!tabs) return;
+    if(!tabs.querySelector('button[data-tab="optimize"]')){
+      const b = document.createElement('button'); b.className='tabbtn'; b.dataset.tab='optimize'; b.textContent='Оптимизация';
+      tabs.insertBefore(b, tabs.lastElementChild);
+      b.addEventListener('click', (e)=>{ e.preventDefault(); if(window.activateTab) window.activateTab('optimize', b); else { document.querySelectorAll('.tabbtn').forEach(x=>x.classList.remove('active')); b.classList.add('active'); document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); const sec = document.getElementById('optimize'); if(sec) sec.classList.add('active'); } });
+    }
+  }
+
+  function ensureOptPage(){
+
+    let sec = document.getElementById('optimize');
+
+    if(!sec){ sec = document.createElement('section'); sec.id='optimize'; sec.className='page'; const anchor=document.querySelector('#reports'); if(anchor&&anchor.parentElement){ anchor.parentElement.insertBefore(sec, anchor);} else { document.body.appendChild(sec);} }
+
+    sec.innerHTML = `
+
+      <div class="row">
+
+        <div class="col" style="flex:0 0 440px;">
+
+          <div class="card">
+
+            <h3>Оптимизация (OR-Tools)</h3>
+
+            <div class="row">
+
+              <div class="col"><label>Исходный план</label><select id="optPlanSel" style="width:100%; padding:8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+
+              <div class="col"><label>Макс. время решения, сек</label><input id="optTime" type="number" min="1" value="10"/></div>
+
+            </div>
+
+            <div class="row" style="margin-top:8px;">
+              <div class="col" style="flex:0 0 240px;">
+                <label>Решатель</label>
+                <select id="optSolver" style="width:100%; padding:8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
+                  <option value="milp" selected>MILP (перестановка по станку)</option>
+                  <option value="jobshop">Job-shop (с предшествованиями)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row" style="margin-top:8px;">
+
+              <div class="col"><label>Горизонт: с</label><input id="optHStart" type="date"/></div>
+
+              <div class="col"><label>по</label><input id="optHEnd" type="date"/></div>
+
+            </div>
+
+            <div class="row" style="margin-top:8px; align-items:center; gap:12px;">
+              <div id="milpOpts" style="display:flex; gap:12px; align-items:center;">
+                <label style="display:flex; gap:8px; align-items:center;"><input id="optMinSetup" type="checkbox" checked/> Минимизировать переналадки</label>
+                <label style="display:flex; gap:8px; align-items:center;"><input id="optMakespan" type="checkbox"/> Минимизировать makespan</label>
+                <label style="display:flex; gap:8px; align-items:center;"><input id="optSmooth" type="checkbox"/> Сглаживать загрузку</label>
+              </div>
+              <div id="jobshopOpts" style="display:none; gap:12px; align-items:center; flex-wrap:wrap;">
+                <div style="flex:0 0 160px;"><label>Вес makespan</label><input id="optJSMakespanW" type="number" step="0.1" value="1.0"/></div>
+                <label style="display:flex; gap:8px; align-items:center;"><input id="optJSSetupAsProc" type="checkbox" checked/> Учитывать переналадку в длительности</label>
+                <div style="flex:0 0 160px;"><label>Вес сглаживания</label><input id="optJSSmooth" type="number" step="0.1" value="0"/></div>
+                <div style="flex:0 0 140px;"><label>Коридор min util</label><input id="optJSMinUtil" type="number" step="0.05" min="0" max="1" value="0.6"/></div>
+                <div style="flex:0 0 140px;"><label>Коридор max util</label><input id="optJSMaxUtil" type="number" step="0.05" min="0" max="1" value="1.0"/></div>
+                <div style="flex:0 0 190px;"><label>Штраф разрыва, /час</label><input id="optJSGapPerHour" type="number" step="0.1" value="0"/></div>
+                <label style="display:flex; gap:8px; align-items:center;"><input id="optJSEnforceCap" type="checkbox" checked/> Ограничивать суточную мощность</label>
+                <div style="flex:0 0 160px;"><label>Мощность, ч/день</label><input id="optJSDayHours" type="number" step="1" min="1" value="8"/></div>
+              </div>
+            </div>
+
+            <div class="row" style="margin-top:10px; gap:10px; align-items:center;">
+
+              <button class="btn danger" id="btnRunOpt">Запустить оптимизацию</button>
+
+              <button class="btn" id="btnPreviewDiff">Предпросмотр (diff)</button>
+
+              <span class="mini" id="optRuntime"></span>
+
+            </div>
+
+          </div>
+
+          <div class="card">
+
+            <h3>Отчёт (было > стало)</h3>
+
+            <div id="optReport" class="kv"></div>
+
+          </div>
+
+        </div>
+
+        <div class="col">
+
+          <div class="card">
+
+            <h3>Heatmap (было / стало)</h3>
+
+            <div class="row" style="gap:12px;">
+
+              <div class="col" style="min-width:320px;"><div class="mini">До</div><div id="hmBefore"></div></div>
+
+              <div class="col" style="min-width:320px;"><div class="mini">После</div><div id="hmAfter"></div></div>
+
+            </div>
+
+          </div>
+
+          <div class="card">
+
+            <h3>Diff операций</h3>
+
+            <div class="table-wrap"><table id="tblDiff"></table></div>
+
+          </div>
+
+        </div>
+
+      </div>`;
+
+  }
+
+  function renderPlansTo(selId, plans){ const sel = el(selId); if(!sel) return; sel.innerHTML=''; (plans||[]).forEach(p=>{ const o=document.createElement('option'); o.value=String(p.id); o.textContent=`#${p.id}: ${p.name} (${p.origin})`; sel.appendChild(o); }); if(window.state?.selectedId) sel.value=String(window.state.selectedId); }
+  async function loadPlansForOpt(){ try{ const plans = await api.plans(); renderPlansTo('optPlanSel', plans); }catch(e){} }
+
+  function getSolver(){ const s = el('optSolver'); return s && s.value ? s.value : 'milp'; }
+  function getOpts(){
+    const solver = getSolver();
+    const timeLimit = parseInt(el('optTime').value||'10',10)||10;
+    const hs = el('optHStart').value||null;
+    const he = el('optHEnd').value||null;
+    if(solver==='jobshop'){
+      const incSetup = !!(el('optJSSetupAsProc') && el('optJSSetupAsProc').checked);
+      const wMakespan = parseFloat(el('optJSMakespanW')?.value||'1')||1;
+      const wSmooth = parseFloat(el('optJSSmooth')?.value||'0')||0;
+      const minUtil = parseFloat(el('optJSMinUtil')?.value||'0')||0;
+      const maxUtil = parseFloat(el('optJSMaxUtil')?.value||'1')||1;
+      const gapPerHour = parseFloat(el('optJSGapPerHour')?.value||'0')||0;
+      const enforceCap = !!(el('optJSEnforceCap') && el('optJSEnforceCap').checked);
+      const dayHours = parseFloat(el('optJSDayHours')?.value||'8')||8;
+      return { time_limit_sec: timeLimit, horizon_start: hs||null, horizon_end: he||null, include_setup_in_duration: incSetup, makespan_weight: wMakespan, smooth_weight: wSmooth, corridor_min_util: minUtil, corridor_max_util: maxUtil, gap_penalty_per_hour: gapPerHour, enforce_daily_cap: enforceCap, daily_cap_hours: dayHours };
+    } else {
+      const minSetup = !!(el('optMinSetup') && el('optMinSetup').checked);
+      const makespan = !!(el('optMakespan') && el('optMakespan').checked);
+      const smooth = !!(el('optSmooth') && el('optSmooth').checked);
+      return { weight_setup: minSetup? 1.0 : 0.0, weight_util: 0.0, weight_makespan: makespan? 1.0 : 0.0, weight_smooth: smooth? 1.0 : 0.0, time_limit_sec: timeLimit, horizon_start: hs||null, horizon_end: he||null };
+    }
+  }
+
+  function renderReport(rep){ const box = el('optReport'); if(!box) return; const b=rep?.before||{}; const a=rep?.after||{}; const rows = [ ['Количество операций', b?.ops, a?.ops], ['Переналадки', b?.setups, a?.setups], ['Переналадки, сек', b?.setup_sec, a?.setup_sec], ['Makespan, сек', b?.makespan_sec, a?.makespan_sec], ['Утилизация, ср.', b?.avg_util, a?.avg_util] ]; box.innerHTML=''; rows.forEach(r=>{ const [k,x,y]=r; const kd=document.createElement('div'); kd.textContent=String(k); const vd=document.createElement('div'); vd.textContent=`${x??''} > ${y??''}`; box.appendChild(kd); box.appendChild(vd); }); }
+
+  function drawHeatmap(targetId, payload){ const root = el(targetId); if(!root) return; root.innerHTML=''; if(!payload||!(payload.machines||[]).length){ root.innerHTML='<div class="mini" style="padding:8px;">Нет данных</div>'; return; } const machines=payload.machines, dates=payload.dates, util=payload.util; const table=document.createElement('table'); const thead=document.createElement('thead'); const trh=document.createElement('tr'); const th0=document.createElement('th'); th0.textContent='Станок \\ Дата'; trh.appendChild(th0); dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); }); thead.appendChild(trh); table.appendChild(thead); const tbody=document.createElement('tbody'); machines.forEach(m=>{ const tr=document.createElement('tr'); const th=document.createElement('th'); th.textContent=m; tr.appendChild(th); dates.forEach(d=>{ const key=`${m}|${d}`; const u=Number(util[key]??0); const td=document.createElement('td'); td.title=`${m} · ${d} · util=${u.toFixed(2)}`; td.style.width='26px'; td.style.height='20px'; td.style.background= u<=0.8? '#16a34a' : (u<=1.0? '#f59e0b' : '#ef4444'); tr.appendChild(td); }); tbody.appendChild(tr); }); table.appendChild(tbody); root.appendChild(table); }
+
+  function renderDiffTable(rows){ const tbl=el('tblDiff'); if(!tbl) return; const data = Array.isArray(rows)? rows: []; tbl.innerHTML=''; if(!data.length){ tbl.innerHTML='<thead><tr><th>Нет изменений</th></tr></thead>'; return; } const cols=['order_id','item_id','machine_id','pos_before','pos_after','start_before','start_after','end_before','end_after','delta_start_sec','delta_end_sec']; const thead=document.createElement('thead'); const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); }); thead.appendChild(trh); const tbody=document.createElement('tbody'); data.forEach(r=>{ const tr=document.createElement('tr'); cols.forEach(c=>{ const td=document.createElement('td'); td.textContent = r[c]===undefined? '' : String(r[c]); tr.appendChild(td); }); tbody.appendChild(tr); }); tbl.appendChild(thead); tbl.appendChild(tbody); }
+
+  async function runOptimization(){ const sel=el('optPlanSel'); if(!sel||!sel.value){ alert('Выберите исходный план'); return; } const opts = getOpts(); const solver=getSolver(); const t0=performance.now(); const j = solver==='jobshop' ? await api.jobshopFrom(parseInt(sel.value,10), opts) : await api.optimizeFrom(parseInt(sel.value,10), opts); const t = performance.now()-t0; const rt=el('optRuntime'); if(rt) rt.textContent = `Время: ${(t/1000).toFixed(2)} c`; if(j?.ok){ renderReport(j.report); if(window.toast) toast(`Оптимизация завершена > выбран план #${j.plan_id}`, true); } else { if(window.toast) toast('Ошибка оптимизации', false); } }
+  async function previewDiff(){
+    const sel=el('optPlanSel'); if(!sel||!sel.value){ alert('Выберите исходный план'); return; }
+    const opts = getOpts(); const solver=getSolver();
+    try{
+      const res = solver==='jobshop' ? await api.jobshopDiff(parseInt(sel.value,10), opts) : await api.optimizeDiff(parseInt(sel.value,10), opts);
+      if(res?.ok){
+        renderReport(res.metrics);
+        drawHeatmap('hmBefore', res.heatmap?.before);
+        drawHeatmap('hmAfter', res.heatmap?.after);
+        renderDiffTable(res.ops_diff);
+      } else {
+        const msg = (res && (res.detail?.msg || res.detail)) || 'У выбранного плана нет расписания для сравнения.';
+        if(window.toast) toast('Ошибка diff: '+ msg, false);
+        else alert('Ошибка diff: '+ msg);
+      }
+    } catch(e){ if(window.toast) toast('Ошибка diff', false); }
+  }
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    ensureOptTab(); ensureOptPage(); loadPlansForOpt();
+    const b1 = document.getElementById('btnRunOpt'); if(b1) b1.addEventListener('click', (e)=>withLoading(e.currentTarget, runOptimization, 'Оптимизирую…'));
+    const b2 = document.getElementById('btnPreviewDiff'); if(b2) b2.addEventListener('click', previewDiff);
+  });
+})();
+
+// === Reports: add plan selector for Gantt/export ===
+(function(){
+  const el = (id) => document.getElementById(id);
+  async function loadPlans(){ try{ const res=await fetch('/plans'); return await res.json(); }catch(e){ return []; } }
+  function inject(){
+    const row = document.querySelector('#reports .card .row');
+    if(!row || document.getElementById('repPlanSel')) return;
+    const wrap=document.createElement('div'); wrap.className='col'; wrap.style.flex='0 0 auto';
+    wrap.innerHTML = '<label>План</label><select id="repPlanSel" style="padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select>';
+    row.insertBefore(wrap, row.firstElementChild);
+  }
+
+  // Toggle solver-specific controls
+  document.addEventListener('change', (ev)=>{
+    const t = ev.target;
+    if(t && t.id === 'optSolver'){
+      const sel = document.getElementById('optSolver');
+      const solver = (sel && sel.value) ? sel.value : 'milp';
+      const milp = document.getElementById('milpOpts');
+      const js = document.getElementById('jobshopOpts');
+      if(milp) milp.style.display = (solver==='milp')? 'flex' : 'none';
+      if(js) js.style.display = (solver==='jobshop')? 'flex' : 'none';
+    }
+  });
+  async function fill(){
+    const sel=el('repPlanSel'); if(!sel) return;
+    const plans = await loadPlans();
+    sel.innerHTML='';
+    const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='— выберите план —'; sel.appendChild(placeholder);
+    plans.forEach(p=>{ const o=document.createElement('option'); o.value=String(p.id); o.textContent=`#${p.id}: ${p.name}`; sel.appendChild(o); });
+    // try to preselect state.selectedId if present
+    const pre = (window.state && window.state.selectedId) ? String(window.state.selectedId): '';
+    if(pre && [...sel.options].some(o=>o.value===pre)) sel.value=pre;
+  }
+  function bind(){
+    const sel=el('repPlanSel'); if(!sel) return;
+    sel.addEventListener('change', async ()=>{
+      const v=parseInt(sel.value,10);
+      if(window.state) window.state.selectedId=v;
+      try{
+        if(window.populateRepWorkshops) await window.populateRepWorkshops();
+        if(window.populateRepItems) await window.populateRepItems();
+        if(window.computeRepFilters) window.computeRepFilters();
+        window.drawOrdersGantt && window.drawOrdersGantt();
+      }catch{}
+    });
+  }
+  document.addEventListener('DOMContentLoaded', async ()=>{
+    inject();
+    await fill();
+    bind();
+    // if a plan is preselected, populate lists and draw immediately
+    const sel=el('repPlanSel');
+    if(sel && sel.value){ try{ await (window.populateRepWorkshops&&window.populateRepWorkshops()); await (window.populateRepItems&&window.populateRepItems()); if(window.computeRepFilters) window.computeRepFilters(); window.drawOrdersGantt && window.drawOrdersGantt(); }catch{} }
+  });
+})();
+ </script>
+
+<script>
+// Отчёты: тепловая карта и гант по станкам
+// Fallbacks for globals in case earlier scripts failed
+if (!('machineLabel' in window) || typeof window.machineLabel !== 'function') {
+  window.machineLabel = function(m){
+    if(!m) return '';
+    var name = (m.name||m.id||'');
+    var wk = (m.workshop||'');
+    return wk ? (name + ' ('+ wk +')') : name;
+  };
+}
+if (!('setupGanttScrollSync' in window) || typeof window.setupGanttScrollSync !== 'function') {
+  window.setupGanttScrollSync = function(){ /* no-op fallback */ };
+}
+  if (!('mixColor' in window) || typeof window.mixColor !== 'function') {
+  window.mixColor = function(from, to, t){
+    function clamp(v){ return Math.max(0, Math.min(1, v)); }
+    t = clamp(t||0);
+    try{
+      var fr=parseInt(from.slice(1,3),16), fg=parseInt(from.slice(3,5),16), fb=parseInt(from.slice(5,7),16);
+      var tr=parseInt(to.slice(1,3),16), tg=parseInt(to.slice(3,5),16), tb=parseInt(to.slice(5,7),16);
+      var rr=Math.round(fr+(tr-fr)*t).toString(16).padStart(2,'0');
+      var rg=Math.round(fg+(tg-fg)*t).toString(16).padStart(2,'0');
+      var rb=Math.round(fb+(tb-fb)*t).toString(16).padStart(2,'0');
+      return '#'+rr+rg+rb;
+    }catch(e){ return to; }
+  }
+
+  // Initialize visibility of solver-specific panels on load (redundant safety)
+  try{
+    document.addEventListener('DOMContentLoaded', function(){
+      var sel = document.getElementById('optSolver');
+      var solver = (sel && sel.value) ? sel.value : 'milp';
+      var milp = document.getElementById('milpOpts');
+      var js = document.getElementById('jobshopOpts');
+      if(milp) milp.style.display = (solver==='milp')? 'flex' : 'none';
+      if(js) js.style.display = (solver==='jobshop')? 'flex' : 'none';
+    });
+  }catch(e){}
+}
+
+ 
+function mix(a,b,t){ const ar=parseInt(a.slice(1,3),16), ag=parseInt(a.slice(3,5),16), ab=parseInt(a.slice(5,7),16); const br=parseInt(b.slice(1,3),16), bg=parseInt(b.slice(3,5),16), bb=parseInt(b.slice(5,7),16); const r=Math.round(ar+(br-ar)*t), g=Math.round(ag+(bg-ag)*t), bl=Math.round(ab+(bb-ab)*t); return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${bl.toString(16).padStart(2,'0')}`; }
+function colorForUtil(u){ if(!isFinite(u)||u<=0) return '#000000'; if(u<1) return mix('#000000','#16a34a', Math.min(1, Math.max(0,u))); if(u>=2) return '#ef4444'; return mix('#16a34a','#ef4444', u-1); }
+async function populatePlans(selId){
+  try{
+    const res=await fetch('/plans');
+    const plans=await res.json();
+    const sel=document.getElementById(selId);
+    if(!sel) return;
+    sel.innerHTML='';
+    const placeholder=document.createElement('option');
+    placeholder.value='';
+    placeholder.textContent='— выберите план —';
+    sel.appendChild(placeholder);
+    (plans||[]).forEach(p=>{ const o=document.createElement('option'); o.value=String(p.id); o.textContent=`#${p.id}: ${p.name}`; sel.appendChild(o); });
+  }catch(e){}
+}
+
+// Copy plan options from rep plan selector if fetch failed or not yet run
+function ensurePlanOptionsFromRep(selId){
+  const target = document.getElementById(selId);
+  if(!target) return;
+  const hasRealOptions = target.options && target.options.length > 1; // placeholder + items
+  if(hasRealOptions) return;
+  const rep = document.getElementById('repPlanSel');
+  if(rep && rep.options && rep.options.length){
+    target.innerHTML='';
+    for(let i=0;i<rep.options.length;i++){
+      const opt = rep.options[i].cloneNode(true);
+      target.appendChild(opt);
+    }
+  }
+}
+async function populateMachinesFromPlan(planSelId, machinesSelId){ const ps=document.getElementById(planSelId); const ms=document.getElementById(machinesSelId); if(!ps||!ms||!ps.value) return; try{ const j=await fetch(`/plans/${ps.value}/heatmap`).then(r=>r.json()); ms.innerHTML=''; (j.machines||[]).forEach(m=>{ const o=document.createElement('option'); o.value=String(m.id); o.textContent=machineLabel(m); ms.appendChild(o); }); }catch(e){} }
+
+async function populateWorkshopsFromPlan(planSelId, wkListId){
+  try{
+    const ps=document.getElementById(planSelId); const dl=document.getElementById(wkListId);
+    if(!ps||!ps.value||!dl) return;
+    const meta = await fetch(`/plans/${ps.value}/heatmap?period=day`).then(r=>r.json());
+    const wks = Array.from(new Set((meta?.machines||[])
+      .map(m=> String(m.workshop||'').trim())
+      .filter(Boolean)))
+      .sort((a,b)=> a.localeCompare(b, 'ru'));
+    dl.innerHTML='';
+    wks.forEach(w=>{ const o=document.createElement('option'); o.value=w; dl.appendChild(o); });
+  }catch(e){ /* ignore */ }
+}
+
+// Paste helpers for machine selection (no pre-fill; default to ALL when empty)
+function parseList(text){
+  return Array.from(new Set(String(text||'')
+    .replace(/\r/g,'\n')
+    .split(/\n|\t|,|;|\s{2,}/)
+    .map(s=>s.trim())
+    .filter(Boolean)));
+}
+function normalizeWorkshopTokens(text){
+  const base = parseList(text).map(s=>s.toLowerCase());
+  const out = new Set(base);
+  base.forEach((t)=>{ const digits = String(t).replace(/\D+/g,''); if(digits) out.add(digits); });
+  return out;
+}
+window.normalizeWorkshopTokens = normalizeWorkshopTokens;
+async function pasteMachinesToSelect(selectId){
+  try{
+    const s = document.getElementById(selectId); if(!s) return;
+    const txt = await navigator.clipboard.readText();
+    const items = parseList(txt);
+    s.innerHTML='';
+    items.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; o.selected=true; s.appendChild(o); });
+  }catch(e){ console.warn('Clipboard read failed', e); }
+}
+function clearMachinesSelect(selectId){ const s=document.getElementById(selectId); if(s) s.innerHTML=''; }
+async function loadHeatmapReport(){
+      const planSel=document.getElementById('hmPlanSel');
+      const machinesSel=document.getElementById('hmMachinesSel');
+      const box=document.getElementById('heatmapReport');
+      if(!planSel||!machinesSel||!box){ return; }
+      if(!planSel.value){ box.innerHTML='<div class="mini" style="padding:8px;">Выберите план</div>'; return; }
+      box.innerHTML='';
+      try{
+        const periodSel = document.getElementById('hmPeriodSel');
+        const period = periodSel ? periodSel.value : 'day';
+        const df = (document.getElementById('hmDf')?.value||'');
+        const dt = (document.getElementById('hmDt')?.value||'');
+        const wkRaw=(document.getElementById('hmWk')?.value||'');
+        const wkList=parseList(wkRaw);
+        const wkSet=normalizeWorkshopTokens(wkRaw);
+        const qs = new URLSearchParams({ period });
+        if(wkList.length){ qs.set('workshop', wkList.join(',')); }
+        const data = await fetch(`/plans/${planSel.value}/heatmap?${qs.toString()}`).then(r=>r.json());
+        let dates=data?.dates||[];
+        if(df||dt){ dates = dates.filter(d=> (!df || d>=df) && (!dt || d<=dt)); }
+
+        const allMachines=data?.machines||[];
+        let machines = allMachines.slice();
+        if(wkSet.size){
+          const byWk = machines.filter(m=> wkSet.has(String(m.workshop||'').toLowerCase()));
+          if(byWk.length) machines = byWk;
+        }
+        const selected=new Set([...(machinesSel.selectedOptions||[])].map(o=>o.value));
+        if(selected.size){
+          const bySel = machines.filter(m=> selected.has(String(m.id)));
+          machines = bySel.length ? bySel : machines.filter(m=> selected.has(String(m.id)));
+        }
+
+        if(!machines.length){ box.innerHTML='<div class="mini" style="padding:8px;">Не выбраны станки</div>'; return; }
+        if(!dates.length){ box.innerHTML='<div class="mini" style="padding:8px;">Нет данных</div>'; return; }
+        const tbl=document.createElement('table'); tbl.className='heatmap-table';
+        const thead=document.createElement('thead'); const trh=document.createElement('tr');
+        const thMachine=document.createElement('th'); thMachine.textContent='Станок'; trh.appendChild(thMachine);
+        const thShop=document.createElement('th'); thShop.textContent='Цех'; trh.appendChild(thShop);
+        dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); });
+        thead.appendChild(trh); tbl.appendChild(thead);
+        const tbody=document.createElement('tbody'); const util=data?.util||{};
+        machines.forEach(m=>{
+          const tr=document.createElement('tr');
+          const nameCell=document.createElement('td'); nameCell.className='name-cell'; nameCell.textContent=m.name||m.id; nameCell.title=machineLabel(m); tr.appendChild(nameCell);
+          const shopCell=document.createElement('td'); shopCell.className='shop-cell'; shopCell.textContent=m.workshop||'-'; shopCell.title=m.workshop||'-'; tr.appendChild(shopCell);
+          dates.forEach(d=>{
+            const key=`${m.id}|${d}`;
+            const u=Number(util[key]??0);
+            const td=document.createElement('td');
+            const span=document.createElement('span'); span.className='hm-val'; span.textContent=`${(u*100).toFixed(0)}%`; td.appendChild(span);
+            let color='#000000';
+            if(u>0 && u<1) color = mixColor('#000000','#16a34a', Math.min(1, Math.max(0,u)));
+            if(u>=1 && u<2) color = mixColor('#16a34a','#ef4444', Math.min(1,u-1));
+            if(u>=2) color='#ef4444';
+            td.style.background=color;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        tbl.appendChild(tbody);
+        box.appendChild(tbl);
+      }catch(e){ box.innerHTML='<div class="mini" style="padding:8px;">Не удалось загрузить тепловую карту</div>'; console.error(e); }
+    }
+
+async function loadMachineGantt(){
+      const planSel = document.getElementById('mgPlanSel');
+      const machinesSel = document.getElementById('mgMachinesSel');
+      const labels = document.getElementById('mgLBody');
+      const body = document.getElementById('mgBody');
+      const scale = document.getElementById('mgHScale');
+      const todayLine = document.getElementById('mgTodayLine');
+      const hint = document.getElementById('mgHint');
+      const zoomLabel = document.getElementById('mgZoomValue');
+      const slider = document.getElementById('mgZoomSlider');
+      if(!planSel||!machinesSel||!labels||!body||!scale||!todayLine) return;
+      const refreshZoomUi = ()=>{ if(zoomLabel) zoomLabel.textContent = `${(window.mgZoomFactor||1).toFixed(2)}x`; if(slider) slider.value = String(window.mgZoomFactor||1); };
+      if(!planSel.value){
+        labels.innerHTML='';
+        body.innerHTML='<div class="mini" style="padding:8px;">Выберите план</div>';
+        scale.innerHTML='';
+        todayLine.style.display='none';
+        if(hint) hint.style.display='none';
+        refreshZoomUi();
+        return;
+      }
+      const selectedIds = new Set([...(machinesSel.selectedOptions||[])].map(o=>o.value));
+      const wkRaw=(document.getElementById('mgWk')?.value||'');
+      const wkList = parseList(wkRaw);
+      const wkSet=normalizeWorkshopTokens(wkRaw);
+      const qsSchedule = new URLSearchParams({ limit: '10000' });
+      if(wkList.length){ qsSchedule.set('workshop', wkList.join(',')); }
+      const qsHeatmap = new URLSearchParams({ period: 'day' });
+      if(wkList.length){ qsHeatmap.set('workshop', wkList.join(',')); }
+      const [ops, meta] = await Promise.all([
+        fetch(`/plans/${planSel.value}/schedule?${qsSchedule.toString()}`).then(r=>r.json()),
+        fetch(`/plans/${planSel.value}/heatmap?${qsHeatmap.toString()}`).then(r=>r.json()).catch(()=>null)
+      ]);
+      const metaById = new Map((meta?.machines||[]).map(m=>[String(m.id), String(m.workshop||'').toLowerCase()]));
+      let filtered = selectedIds.size ? ops.filter(o=>selectedIds.has(String(o.machine_id))) : ops; if(wkSet.size){ const allowed=new Set(); metaById.forEach((wk,mid)=>{ if(wkSet.has(wk)) allowed.add(mid); }); filtered = filtered.filter(o=> allowed.has(String(o.machine_id))); } const dfv=(document.getElementById('mgDf')?.value||''); const dtv=(document.getElementById('mgDt')?.value||''); const dfDate=dfv? new Date(dfv+'T00:00:00'):null; const dtDate=dtv? new Date(dtv+'T23:59:59'):null; if(dfDate||dtDate){ filtered = filtered.filter(o=> (!dfDate || parse(o.end_ts) >= dfDate) && (!dtDate || parse(o.start_ts) <= dtDate)); }
+      const parse = (x)=> new Date(x);
+      if(!filtered.length){
+        labels.innerHTML='';
+        body.innerHTML='<div class="mini" style="padding:8px;">Нет операций для выбранных станков</div>';
+        scale.innerHTML='';
+        todayLine.style.display='none';
+        if(hint) hint.style.display='none';
+        refreshZoomUi();
+        return;
+      }
+      const minStart = filtered.reduce((m,o)=> m && m<parse(o.start_ts)?m:parse(o.start_ts), null);
+      const maxEnd = filtered.reduce((m,o)=> m && m>parse(o.end_ts)?m:parse(o.end_ts), null);
+      const clampZoom = (val)=> Math.max(0.25, Math.min(6, val||1));
+      const zoomFromUi = slider ? parseFloat(slider.value||window.mgZoomFactor||1) : (window.mgZoomFactor||1);
+      const zoom = clampZoom(zoomFromUi);
+      window.mgZoomFactor = zoom;
+      if(slider && slider.value !== String(zoom)) slider.value = String(zoom);
+      if(zoomLabel) zoomLabel.textContent = `${zoom.toFixed(2)}x`;
+      const HOUR_MS = 3600000;
+      const DAY_MS = 86400000;
+      const baseHourPx = 1.5;
+      const hourPx = baseHourPx * zoom;
+      const pxPerMs = hourPx / HOUR_MS;
+      const totalMs = Math.max(HOUR_MS, maxEnd - minStart);
+      const widthPx = Math.max(600, Math.round(totalMs * pxPerMs) + 200);
+      scale.innerHTML='';
+      scale.style.width = `${widthPx}px`;
+      body.innerHTML='';
+      body.style.position='relative';
+      body.style.width = `${widthPx}px`;
+      labels.innerHTML='';
+      const machineNames = {};
+      [...machinesSel.options].forEach(opt=>{ machineNames[opt.value]=opt.textContent; });
+      const addTick = (offsetMs, heightRatio=1, labelText=null)=>{
+        const tick=document.createElement('div');
+        tick.className='tick';
+        tick.style.left=`${Math.round(offsetMs*pxPerMs)}px`;
+        tick.style.height = `${Math.round(100*heightRatio)}%`;
+        scale.appendChild(tick);
+        if(labelText){
+          const lbl=document.createElement('div');
+          lbl.className='lbl';
+          lbl.textContent=labelText;
+          tick.appendChild(lbl);
+        }
+      };
+      const totalDays = Math.max(1, Math.ceil(totalMs / DAY_MS));
+      for(let day=0; day<=totalDays; day++){
+        const offsetMs = day*DAY_MS;
+        const dateStr = new Date(minStart.getTime()+offsetMs).toISOString().slice(0,10);
+        addTick(offsetMs, 1, dateStr);
+        if(zoom>=1.5 && day<totalDays){
+          for(let h=6; h<24; h+=6){
+            addTick(offsetMs + h*HOUR_MS, 0.7, null);
+          }
+        }
+        if(zoom>=3 && day<totalDays){
+          for(let h=1; h<24; h++){
+            addTick(offsetMs + h*HOUR_MS, 0.4, null);
+          }
+        }
+      }
+      const showHint = (evt,text)=>{ if(!hint) return; hint.innerHTML=text; hint.style.display='block'; hint.style.left=`${evt.clientX + 12}px`; hint.style.top=`${evt.clientY - 12}px`; };
+      const hideHint = ()=>{ if(hint) hint.style.display='none'; };
+      const byMachine = filtered.reduce((acc,o)=>{ const key=String(o.machine_id); (acc[key]=acc[key]||[]).push(o); return acc; }, {});
+      Object.keys(byMachine).sort().forEach(mid=>{
+        const label=document.createElement('div');
+        label.className='cell-label';
+        label.style.height='24px';
+        label.textContent=machineNames[mid]||mid;
+        labels.appendChild(label);
+        const row=document.createElement('div');
+        row.style.position='relative';
+        row.style.height='24px';
+        const opsList = byMachine[mid].slice().sort((a,b)=> parse(a.start_ts)-parse(b.start_ts));
+        opsList.forEach(o=>{
+          const startMs = parse(o.start_ts)-minStart;
+          const durMs = Math.max(HOUR_MS/4, parse(o.end_ts)-parse(o.start_ts));
+          const left = Math.round(startMs*pxPerMs);
+          const width = Math.max(6, Math.round(durMs*pxPerMs));
+          const bar=document.createElement('div');
+          bar.className='bar';
+          bar.style.left=`${left+2}px`;
+          bar.style.width=`${width-4}px`;
+          bar.style.top='2px';
+          const itemLabel = o.article_name || o.item_name || o.item_id || '';
+          if(itemLabel){
+            const span=document.createElement('span'); span.className='bar-text'; span.textContent=itemLabel; bar.appendChild(span);
+          }
+          const tooltip = `Заказ ${o.order_id}<br/>Номенклатура: ${itemLabel || o.item_id}<br/>${new Date(o.start_ts).toLocaleString()} - ${new Date(o.end_ts).toLocaleString()}`;
+          bar.addEventListener('mouseenter', (evt)=>showHint(evt, tooltip));
+          bar.addEventListener('mousemove', (evt)=>showHint(evt, tooltip));
+          bar.addEventListener('mouseleave', hideHint);
+          row.appendChild(bar);
+        });
+        body.appendChild(row);
+        const sep=document.createElement('div');
+        sep.className='group-divider';
+        body.appendChild(sep);
+      });
+      const now=new Date();
+      if(minStart && now>=minStart && now<=maxEnd){
+        const offsetPx = Math.round((now - minStart) * pxPerMs);
+        todayLine.style.left=`calc(var(--labels) + ${offsetPx}px)`;
+        todayLine.style.display='block';
+      } else {
+        todayLine.style.display='none';
+      }
+      hideHint();
+    }
+
+
+  document.addEventListener('DOMContentLoaded', async ()=>{
+    await populatePlans('hmPlanSel');
+    await populatePlans('mgPlanSel');
+    await populatePlans('orderPlanSel');
+    ensurePlanOptionsFromRep('orderPlanSel');
+    // Ensure machine lists are populated based on selected plan
+    const HPS=document.getElementById('hmPlanSel');
+    if(HPS){ HPS.addEventListener('change', ()=>{ populateMachinesFromPlan('hmPlanSel','hmMachinesSel'); populateWorkshopsFromPlan('hmPlanSel','hmWkList'); }); }
+    const MPS=document.getElementById('mgPlanSel');
+    if(MPS){ MPS.addEventListener('change', ()=>{ populateMachinesFromPlan('mgPlanSel','mgMachinesSel'); populateWorkshopsFromPlan('mgPlanSel','mgWkList'); }); }
+    const L=document.getElementById('btnLoadHeatmapReport'); if(L) L.addEventListener('click', (e)=> withLoading(e.currentTarget, loadHeatmapReport, 'Построение…'));
+    const P=document.getElementById('hmPeriodSel'); if(P) P.addEventListener('change', loadHeatmapReport);
+    const HP=document.getElementById('btnHMPaste'); if(HP) HP.addEventListener('click', ()=>pasteMachinesToSelect('hmMachinesSel'));
+    const HR=document.getElementById('btnHMReset'); if(HR) HR.addEventListener('click', ()=>clearMachinesSelect('hmMachinesSel'));
+    const LM=document.getElementById('btnLoadMachineGantt'); if(LM) LM.addEventListener('click', (e)=> withLoading(e.currentTarget, loadMachineGantt, 'Построение…'));
+    const MP=document.getElementById('btnMGPaste'); if(MP) MP.addEventListener('click', ()=>pasteMachinesToSelect('mgMachinesSel'));
+    const MR=document.getElementById('btnMGReset'); if(MR) MR.addEventListener('click', ()=>clearMachinesSelect('mgMachinesSel'));
+    const slider=document.getElementById('mgZoomSlider'); if(slider) slider.value=String(window.mgZoomFactor||1);
+    const applyZoom=(value)=>{ window.mgZoomFactor = Math.max(0.25, Math.min(6, value)); if(slider) slider.value=String(window.mgZoomFactor); loadMachineGantt(); };
+    if(slider){ slider.addEventListener('input', ()=>applyZoom(parseFloat(slider.value)||1)); }
+    const zoomIn=document.getElementById('btnMGZoomIn'); const zoomOut=document.getElementById('btnMGZoomOut');
+    if(zoomIn) zoomIn.addEventListener('click', ()=>applyZoom((window.mgZoomFactor||1)+0.25));
+    if(zoomOut) zoomOut.addEventListener('click', ()=>applyZoom((window.mgZoomFactor||1)-0.25));
+    setupGanttScrollSync('gantt');
+    setupGanttScrollSync('mgGantt');
+  });
+</script>
+<script>
+  // Files tab unified actions: save to plan
+  (function(){
+    const el = (id)=>document.getElementById(id);
+    const setStatus = window.setFilePlanStatus || ((txt)=>{ const box=document.getElementById('filePlanStatus'); if(box) box.textContent=txt||''; });
+    const saveBtn = el('btnSavePlanFiles');
+    if(saveBtn){
+      saveBtn.addEventListener('click', async (evt)=>{
+        const btn = evt.currentTarget;
+        const withLoadingFn = window.withLoading || (async (_b, fn)=>fn());
+        await withLoadingFn(btn, async ()=>{
+          const nameInput = el('filePlanName');
+          const name = (nameInput && nameInput.value ? nameInput.value.trim() : '') || `Greedy ${new Date().toLocaleString()}`;
+          setStatus('Создаю план...');
+          const created = await fetch('/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}).then(r=>r.json());
+          setStatus(`Создан #${created.id}, статус ${created.status || 'draft'}`);
+          try{
+            const payload = {};
+            try{
+              if(window.lastUploadedPaths){
+                payload.plan_path = window.lastUploadedPaths.plan || null;
+                payload.bom_path = window.lastUploadedPaths.bom || null;
+                payload.machines_path = window.lastUploadedPaths.machines || null;
+                payload.stock_path = window.lastUploadedPaths.stock || null;
+              }
+            }catch(e){}
+            const res = await fetch(`/plans/${created.id}/run-greedy`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).then(r=>r.json());
+            setStatus(`Готов #${created.id}: ops=${res.ops ?? '?'} days=${res.days ?? '?'}`);
+            if(window.state){ window.state.selectedId = created.id; }
+            try{ localStorage.setItem('selectedPlanId', String(created.id)); }catch(e){}
+            if(window.reloadPlans) await window.reloadPlans();
+            if(window.loadHeatmap) await window.loadHeatmap();
+          }catch(e){
+            setStatus(`Ошибка сохранения для #${created.id}`);
+            if(window.toast) window.toast(e?.message || 'Ошибка сохранения плана', false);
+          }
+        }, 'Сохраняю:');
+      });
+    }
+  })();
+</script>
+
+
+
+
+
+
+
+

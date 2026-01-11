@@ -1,0 +1,37 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local env
+.env
+.venv/
+venv/
+
+# Local data and outputs
+backups/
+out/
+uploads/
+*.db
+*.db-*
+*schedule_out*.xlsx
+*schedule_out*.png
+order_ops_plan*.xlsx
+BOM*.xlsx
+machines.xlsx
+plan of sales*.xlsx
+stock.xlsx
+receipts.xlsx
+milp*.xlsx
+
+# UI backups
+src/so_planner/ui/index.backup.html
+src/so_planner/ui/index.before_recode.html
+src/so_planner/ui/index.html.bak
+
+# Local helpers
+Invoke-RestMethod -Method Post -Uri.txt
+inspect_db.py
+CON
