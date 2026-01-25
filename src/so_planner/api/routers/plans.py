@@ -1,16 +1,17 @@
 # src/so_planner/api/routers/plans.py
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session
 from ...db import get_db
-import os
+import os, logging
 from pydantic import BaseModel
 from ...db.models import PlanVersion, ScheduleOp, MachineLoadDaily, DimMachine
-from ...scheduling.greedy_scheduler import run_pipeline
+from ...scheduling.greedy_scheduler import run_pipeline, _ensure_netting_tables, load_stock_any
 from ...scheduling.utils import compute_daily_loads
 from ...scheduling.greedy.loaders import load_machines as _load_machines, load_bom_article_name_map
 from pathlib import Path
+from typing import Optional
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -25,6 +26,42 @@ def _normalize_workshop_tokens(raw: str | None) -> set[str]:
     digits = {re.sub(r"\D+", "", t) for t in tokens}
     digits = {d for d in digits if d}
     return tokens | digits
+
+def _ingest_stock_snapshot(stock_path: str, db: Session) -> Optional[int]:
+    """Load stock Excel into stock_snapshot/stock_line; return snapshot id or None."""
+    if not stock_path or not os.path.exists(stock_path):
+        return None
+    try:
+        _ensure_netting_tables(db)
+        df = load_stock_any(Path(stock_path))
+        if df is None or df.empty:
+            return None
+        if "workshop" not in df.columns:
+            df["workshop"] = ""
+        df = df[["item_id", "stock_qty", "workshop"]].copy()
+        df["item_id"] = df["item_id"].astype(str)
+        df["workshop"] = df["workshop"].fillna("").astype(str)
+        df["stock_qty"] = pd.to_numeric(df["stock_qty"], errors="coerce").fillna(0).astype(int)
+        df = df.groupby(["item_id", "workshop"], as_index=False)["stock_qty"].sum()
+
+        snap_id = db.execute(
+            text("INSERT INTO stock_snapshot (name, taken_at, notes) VALUES (:name, CURRENT_TIMESTAMP, :notes) RETURNING id"),
+            {"name": f"Upload {Path(stock_path).name}", "notes": stock_path},
+        ).scalar_one()
+        rows = [
+            {"snapshot_id": int(snap_id), "item_id": r.item_id, "workshop": r.workshop, "stock_qty": int(r.stock_qty)}
+            for r in df.itertuples(index=False)
+        ]
+        if rows:
+            db.execute(
+                text("INSERT INTO stock_line (snapshot_id,item_id,workshop,stock_qty) VALUES (:snapshot_id,:item_id,:workshop,:stock_qty)"),
+                rows,
+            )
+        db.commit()
+        return int(snap_id)
+    except Exception as e:
+        logging.warning("Stock ingest failed: %s", e)
+        return None
 
 class PlanCreate(BaseModel):
     name: str
@@ -92,6 +129,13 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
         machines_path = (body.machines_path if body else None) or "machines.xlsx"
         stock_path = (body.stock_path if body else None) or stock_path_env
         mode = (body.mode if body else None) or ""
+
+        # Refresh stock snapshot in DB so reports use the uploaded file
+        try:
+            _ingest_stock_snapshot(stock_path, db)
+        except Exception:
+            logging.warning("Stock ingest inside run_greedy_into_plan failed for %s", stock_path)
+
         out_xlsx, sched_df = run_pipeline(
             plan_path,
             bom_path,

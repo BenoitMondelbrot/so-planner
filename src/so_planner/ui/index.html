@@ -187,6 +187,7 @@
       <button class="tabbtn" data-tab="netting" onclick="window.activateTab && window.activateTab('netting', this)">Неттинг</button>
       <button class="tabbtn" data-tab="plans" onclick="window.activateTab && window.activateTab('plans', this)">Планы</button>
       <button class="tabbtn" data-tab="reports" onclick="window.activateTab && window.activateTab('reports', this)">Отчёты</button>
+      <button class="tabbtn" data-tab="transfer" onclick="window.activateTab && window.activateTab('transfer', this)">Дефицит к перемещению</button>
     </div>
     <div style="flex:1"></div>
     <div class="theme-ctrl">
@@ -531,6 +532,42 @@
     </div>
   </section>
 
+    <!-- Transfer deficit -->
+  <section id="transfer" class="page">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>Дефицит к перемещению</h3>
+          <div class="row" style="gap:8px; align-items:flex-end;">
+            <div class="col" style="flex:0 0 220px;"><label>План</label><select id="tdPlanSel" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"></select></div>
+            <div class="col" style="flex:1 1 260px;"><label>Артикулы (вставьте списком)</label><textarea id="tdItems" rows="2" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text);"></textarea></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnTDItemsPaste">Вставить</button></div>
+          </div>
+          <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px;">
+            <div class="col" style="flex:1 1 240px;"><label>Цех (массовый ввод, источник/получатель)</label><textarea id="tdWorkshops" rows="2" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text);"></textarea></div>
+            <div class="col" style="flex:0 0 auto;"><label>&nbsp;</label><button class="btn" id="btnTDWkPaste">Вставить</button></div>
+            <div class="col" style="flex:0 0 150px;"><label>Дата с</label><input id="tdDf" type="date"/></div>
+            <div class="col" style="flex:0 0 150px;"><label>Дата по</label><input id="tdDt" type="date"/></div>
+            <div class="col" style="flex:0 0 160px;"><label>Формат</label><select id="tdPeriod" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)"><option value="day">По дням</option><option value="week">По неделям</option><option value="month">По месяцам</option></select></div>
+          </div>
+          <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px;">
+            <div class="col" style="flex:1 1 280px;"><label>Путь для Excel</label><input id="tdOutPath" type="text" value="out/transfer_deficit.xlsx"/></div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;">
+              <button class="btn primary" id="btnTDLoad">Показать отчёт</button>
+              <button class="btn" id="btnTDExport">Сохранить в Excel</button>
+            </div>
+          </div>
+          <div id="tdMeta" class="mini" style="margin-top:6px;"></div>
+        </div>
+
+        <div class="card">
+          <h3>Отчёт</h3>
+          <div class="table-wrap"><div id="tdReport" style="padding:6px;" class="mini">Задайте фильтры и нажмите «Показать отчёт»</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <script>
     const el = (id) => document.getElementById(id);
     const toast = (msg, ok=false) => {
@@ -626,6 +663,11 @@
           if(window.computeRepFilters) window.computeRepFilters();
           if(window.drawOrdersGantt) window.drawOrdersGantt();
           if(window.loadHeatmapReport) window.loadHeatmapReport();
+        }catch(e){}
+      }
+      if(tid==='transfer'){
+        try{
+          if(typeof window.populatePlans==='function') window.populatePlans('tdPlanSel');
         }catch(e){}
       }
     };
@@ -1816,11 +1858,99 @@ async function loadMachineGantt(){
       hideHint();
     }
 
+    const fmtTdVal = (v)=>{
+      const num = Number(v||0);
+      if(!Number.isFinite(num)) return '';
+      return Math.abs(num - Math.round(num)) < 0.001 ? String(Math.round(num)) : num.toFixed(1);
+    };
+
+    function renderTransferReport(data){
+      const box = el('tdReport');
+      if(!box) return;
+      if(!data || !Array.isArray(data.rows) || !data.rows.length){
+        box.innerHTML = '<div class="mini" style="padding:8px;">Нет данных для выбранных фильтров</div>';
+        return;
+      }
+      const dates = data.dates || [];
+      const tbl = document.createElement('table');
+      tbl.className = 'heatmap-table';
+      const thead=document.createElement('thead'); const trh=document.createElement('tr');
+      ['Артикул','Наименование','Цех','Цех получатель','Запас на цехе','Запас на цехе получателе','Строка'].forEach(h=>{ const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+      dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); });
+      thead.appendChild(trh); tbl.appendChild(thead);
+      const tbody=document.createElement('tbody');
+      data.rows.forEach(r=>{
+        const base=[r.item_id||'', r.item_name||'', r.source_workshop||'', r.target_workshop||'', fmtTdVal(r.stock_source||0), fmtTdVal(r.stock_target||0)];
+        const planTr=document.createElement('tr');
+        base.forEach(v=>{ const td=document.createElement('td'); td.textContent=v; planTr.appendChild(td); });
+        const typeTd=document.createElement('td'); typeTd.textContent='План к перемещению'; planTr.appendChild(typeTd);
+        dates.forEach(d=>{ const td=document.createElement('td'); const val=(r.plan&&r.plan[d]!=null)? r.plan[d]:0; td.textContent = fmtTdVal(val); planTr.appendChild(td); });
+        tbody.appendChild(planTr);
+
+        const defTr=document.createElement('tr');
+        base.forEach(()=>{ const td=document.createElement('td'); td.textContent=''; defTr.appendChild(td); });
+        const typeTd2=document.createElement('td'); typeTd2.textContent='Накопительный дефицит'; defTr.appendChild(typeTd2);
+        dates.forEach(d=>{ const td=document.createElement('td'); const val=(r.deficit&&r.deficit[d]!=null)? r.deficit[d]:0; td.textContent = fmtTdVal(val); if(Number(val)>0){ td.style.color='#fca5a5'; td.style.fontWeight='600'; } defTr.appendChild(td); });
+        tbody.appendChild(defTr);
+      });
+      tbl.appendChild(tbody);
+      box.innerHTML='';
+      box.appendChild(tbl);
+    }
+
+    async function loadTransferReport(btn){
+      const planSel = el('tdPlanSel');
+      const box = el('tdReport');
+      if(!planSel || !planSel.value){ if(box) box.innerHTML='<div class="mini" style="padding:8px;">Выберите план</div>'; return; }
+      const params = new URLSearchParams();
+      const items=parseList(el('tdItems')?.value||''); items.forEach(it=> params.append('items', it));
+      const wks=parseList(el('tdWorkshops')?.value||''); wks.forEach(w=> params.append('workshops', w));
+      const dfVal=el('tdDf')?.value||''; const dtVal=el('tdDt')?.value||''; const period=el('tdPeriod')?.value||'day';
+      if(dfVal) params.set('date_from', dfVal); if(dtVal) params.set('date_to', dtVal); params.set('period', period);
+      const meta = el('tdMeta'); if(meta) meta.textContent='';
+      const wl = window.withLoading || (async (_b, fn)=>fn());
+      await wl(btn||null, async ()=>{
+        const res = await fetch(`/reports/plans/${planSel.value}/transfer_deficit?${params.toString()}`).then(r=>r.json());
+        renderTransferReport(res);
+        if(meta){
+          const snap = res.stock_snapshot_id ? `Снимок склада #${res.stock_snapshot_id}${res.stock_snapshot_taken_at ? ' от '+res.stock_snapshot_taken_at : ''}` : 'Снимок склада не найден';
+          meta.textContent = `${res.rows?.length||0} строк · ${res.dates?.length||0} периодов · ${snap}`;
+        }
+      }, 'Считаю:');
+    }
+
+    async function exportTransferReport(btn){
+      const planSel = el('tdPlanSel');
+      if(!planSel || !planSel.value){ if(typeof toast==='function') toast('Выберите план', false); return; }
+      const payload = {
+        items: parseList(el('tdItems')?.value||''),
+        workshops: parseList(el('tdWorkshops')?.value||''),
+        date_from: el('tdDf')?.value || null,
+        date_to: el('tdDt')?.value || null,
+        period: el('tdPeriod')?.value || 'day',
+        out_path: el('tdOutPath')?.value || 'out/transfer_deficit.xlsx',
+      };
+      const wl = window.withLoading || (async (_b, fn)=>fn());
+      await wl(btn||null, async ()=>{
+        const res = await fetch(`/reports/plans/${planSel.value}/transfer_deficit/export`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).then(r=>r.json());
+        if(res && res.path){ toast(`Сохранено: ${res.path}`, true); } else { toast('Нет данных для выгрузки', false); }
+      }, 'Сохраняю:');
+    }
+
+    async function pasteToField(id){
+      try{
+        const txt = await navigator.clipboard.readText();
+        const t = document.getElementById(id);
+        if(t){ t.value = txt; }
+      }catch(e){ console.warn('Clipboard read failed', e); }
+    }
+
 
   document.addEventListener('DOMContentLoaded', async ()=>{
     await populatePlans('hmPlanSel');
     await populatePlans('mgPlanSel');
     await populatePlans('orderPlanSel');
+    await populatePlans('tdPlanSel');
     ensurePlanOptionsFromRep('orderPlanSel');
     // Ensure machine lists are populated based on selected plan
     const HPS=document.getElementById('hmPlanSel');
@@ -1840,6 +1970,10 @@ async function loadMachineGantt(){
     const zoomIn=document.getElementById('btnMGZoomIn'); const zoomOut=document.getElementById('btnMGZoomOut');
     if(zoomIn) zoomIn.addEventListener('click', ()=>applyZoom((window.mgZoomFactor||1)+0.25));
     if(zoomOut) zoomOut.addEventListener('click', ()=>applyZoom((window.mgZoomFactor||1)-0.25));
+    const TDLoad=document.getElementById('btnTDLoad'); if(TDLoad) TDLoad.addEventListener('click', (e)=>loadTransferReport(e.currentTarget));
+    const TDExport=document.getElementById('btnTDExport'); if(TDExport) TDExport.addEventListener('click', (e)=>exportTransferReport(e.currentTarget));
+    const TDPasteItems=document.getElementById('btnTDItemsPaste'); if(TDPasteItems) TDPasteItems.addEventListener('click', ()=>pasteToField('tdItems'));
+    const TDPasteWk=document.getElementById('btnTDWkPaste'); if(TDPasteWk) TDPasteWk.addEventListener('click', ()=>pasteToField('tdWorkshops'));
     setupGanttScrollSync('gantt');
     setupGanttScrollSync('mgGantt');
   });
@@ -1885,11 +2019,6 @@ async function loadMachineGantt(){
     }
   })();
 </script>
-
-
-
-
-
 
 
 

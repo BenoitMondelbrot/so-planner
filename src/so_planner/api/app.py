@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, or_
+from collections import defaultdict
 
 from fastapi import Query, FastAPI, UploadFile, File, HTTPException, Depends
 
@@ -20,8 +21,10 @@ from fastapi import Query, FastAPI, UploadFile, File, HTTPException, Depends
 # ВАЖНО: не тянем Base из .models, а берём только SessionLocal/init_db из пакета db
 from ..db import SessionLocal, init_db
 
+from pathlib import Path
+
 from ..ingest.loader import load_excels, validate_files
-from ..scheduling.greedy_scheduler import run_greedy, compute_orders_timeline
+from ..scheduling.greedy_scheduler import run_greedy, compute_orders_timeline, load_stock_any
 from ..export.report import export_excel
 from ..analysis.bottlenecks import scan_bottlenecks
 from .routers import plans, optimize
@@ -104,6 +107,14 @@ class NettingRunIn(BaseModel):
     bom_version_id: Optional[str] = None
     params: Optional[dict] = None
 
+class TransferDeficitExport(BaseModel):
+    out_path: Optional[str] = None
+    items: Optional[List[str]] = None
+    workshops: Optional[List[str]] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    period: Optional[str] = "day"
+
 # --- PATCH END ---
 
 # ================== Helpers (JSON-safe) ==================
@@ -154,6 +165,63 @@ def _normalize_workshop_tokens_list(values: Optional[List[str]]) -> tuple[list[s
     all_tokens = sorted(tokens | digits)
     prefixes = sorted({t for t in all_tokens if t.isdigit()})
     return all_tokens, prefixes
+
+def _parse_token_list(values: Optional[List[str]]) -> list[str]:
+    """Split comma/space/newline separated values into a unique ordered list."""
+    if not values:
+        return []
+    import re
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        parts = re.split(r"[,\s;]+", str(v))
+        for p in parts:
+            t = p.strip()
+            if not t:
+                continue
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+    return out
+
+def _ingest_stock_snapshot(stock_path: str, db: Session) -> Optional[int]:
+    """Load stock Excel into stock_snapshot/stock_line; return new snapshot id."""
+    if not stock_path or not os.path.exists(stock_path):
+        return None
+    try:
+        ensure_tables(db)
+        df = load_stock_any(Path(stock_path))
+        if df is None or df.empty:
+            return None
+        if "workshop" not in df.columns:
+            df["workshop"] = ""
+        df = df[["item_id", "stock_qty", "workshop"]].copy()
+        df["item_id"] = df["item_id"].astype(str)
+        df["workshop"] = df["workshop"].fillna("").astype(str)
+        df["stock_qty"] = pd.to_numeric(df["stock_qty"], errors="coerce").fillna(0).astype(int)
+        df = df.groupby(["item_id", "workshop"], as_index=False)["stock_qty"].sum()
+
+        snap_name = f"Upload {Path(stock_path).name}"
+        snap_id = db.execute(
+            text("INSERT INTO stock_snapshot (name, taken_at, notes) VALUES (:name, CURRENT_TIMESTAMP, :notes) RETURNING id"),
+            {"name": snap_name, "notes": stock_path},
+        ).scalar_one()
+        rows = [
+            {"snapshot_id": int(snap_id), "item_id": r.item_id, "workshop": r.workshop, "stock_qty": int(r.stock_qty)}
+            for r in df.itertuples(index=False)
+        ]
+        if rows:
+            db.execute(
+                text("INSERT INTO stock_line (snapshot_id,item_id,workshop,stock_qty) VALUES (:snapshot_id,:item_id,:workshop,:stock_qty)"),
+                rows,
+            )
+        db.commit()
+        return int(snap_id)
+    except Exception as e:
+        logging.warning("Stock ingest failed: %s", e)
+        return None
 
 def get_db():
     db = SessionLocal()
@@ -1236,3 +1304,457 @@ def report_ops_for_orders(
     except Exception as e:
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
+
+
+# ================== Transfer deficit report ==================
+def _compute_transfer_deficit(
+    plan_id: int,
+    items: Optional[List[str]] = None,
+    workshops: Optional[List[str]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    period: str = "day",
+):
+    period = (period or "day").lower()
+    if period not in ("day", "week", "month"):
+        period = "day"
+
+    item_tokens = _parse_token_list(items)
+    item_filter = {t.lower() for t in item_tokens}
+    wk_tokens, wk_prefixes = _normalize_workshop_tokens_list(workshops)
+
+    def _match_workshop(val: str | None) -> bool:
+        if not wk_tokens:
+            return True
+        if not val:
+            return False
+        w = val.strip().lower()
+        if not w:
+            return False
+        if w in wk_tokens:
+            return True
+        return any(w.startswith(p) for p in wk_prefixes)
+
+    try:
+        with SessionLocal() as s:
+            ops = s.execute(
+                text(
+                    """
+                    SELECT order_id, item_id, article_name, machine_id, start_ts, end_ts, qty
+                    FROM schedule_ops
+                    WHERE plan_id = :pid
+                    """
+                ),
+                {"pid": plan_id},
+            ).mappings().all()
+            if not ops:
+                return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+
+            machines = s.execute(text("SELECT machine_id, name, family FROM dim_machine")).mappings().all()
+            family_by_id = {str(r["machine_id"]): r.get("family") for r in machines}
+            family_by_name = {}
+            for r in machines:
+                nm = str(r["name"])
+                fam = r.get("family")
+                if fam is not None and nm not in family_by_name:
+                    family_by_name[nm] = fam
+
+            def map_workshop(mid: str | None) -> str | None:
+                if mid is None:
+                    return None
+                mid_str = str(mid)
+                if mid_str in family_by_id and family_by_id[mid_str] is not None:
+                    return str(family_by_id[mid_str])
+                base = mid_str.split("_")[0]
+                fam = family_by_id.get(base) or family_by_name.get(mid_str) or family_by_name.get(base)
+                return str(fam) if fam is not None else None
+
+            df = pd.DataFrame(ops)
+            if df.empty:
+                return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+            df["start_ts"] = pd.to_datetime(df["start_ts"])
+            df["end_ts"] = pd.to_datetime(df["end_ts"])
+            df["base_order_id"] = df["order_id"].astype(str).str.split(":", n=1).str[0]
+            df["workshop"] = df["machine_id"].apply(map_workshop)
+
+            if item_filter:
+                bases = set(
+                    df[df["item_id"].astype(str).str.lower().isin(item_filter)]["base_order_id"].unique().tolist()
+                )
+                if not bases:
+                    return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+                df = df[df["base_order_id"].isin(bases)]
+
+            orders = df.groupby(["order_id", "item_id", "base_order_id"], as_index=False).agg(
+                start_ts=("start_ts", "min"),
+                end_ts=("end_ts", "max"),
+                qty=("qty", lambda s2: float(pd.to_numeric(s2, errors="coerce").max() or 0.0)),
+                article_name=("article_name", "first"),
+                workshop=("workshop", lambda s2: s2.dropna().mode().iat[0] if not s2.dropna().empty else None),
+            )
+            orders["start_date"] = orders["start_ts"].dt.date
+            orders["end_date"] = orders["end_ts"].dt.date
+            orders["duration_days"] = (pd.to_datetime(orders["end_date"]) - pd.to_datetime(orders["start_date"])).dt.days + 1
+            orders.loc[orders["duration_days"] < 1, "duration_days"] = 1
+            orders["base_item"] = (
+                orders["base_order_id"].fillna("").astype(str).str.split(":", n=1).str[0].str.split("-", n=1).str[0]
+            )
+
+            item_workshop = {}
+            for item_id, grp in orders.groupby("item_id"):
+                w = grp["workshop"].dropna()
+                if not w.empty:
+                    item_workshop[str(item_id)] = str(w.mode().iat[0])
+
+            item_name = {}
+            for _, r in orders.iterrows():
+                nm = str(r.get("article_name") or "").strip()
+                iid = str(r.get("item_id"))
+                if nm and iid not in item_name:
+                    item_name[iid] = nm
+
+            parent_by_base = {}
+            for _, r in orders.iterrows():
+                base = str(r["base_order_id"])
+                base_item = str(r["base_item"])
+                if str(r["item_id"]) == base_item and base not in parent_by_base:
+                    parent_by_base[base] = r
+            for base, grp in orders.groupby("base_order_id"):
+                bkey = str(base)
+                if bkey not in parent_by_base and not grp.empty:
+                    parent_by_base[bkey] = grp.iloc[0]
+
+            bom_rows = s.execute(text("SELECT item_id, component_id, qty_per FROM bom")).mappings().all()
+            bom_map = {}
+            for br in bom_rows:
+                # DB stores item_id as component (child), component_id as parent (see loader synonyms)
+                key = (str(br["component_id"]), str(br["item_id"]))
+                q = float(br.get("qty_per") or 0.0)
+                prev = bom_map.get(key)
+                if prev is None or q > prev:
+                    bom_map[key] = q
+            # Fallback: try BOM.xlsx to fill missing pairs
+            try:
+                def _nc(s: str) -> str:
+                    return str(s).strip().lower().replace(" ", "").replace("_", "")
+                bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
+                if bom_path and os.path.exists(bom_path):
+                    bom_df = pd.read_excel(bom_path)
+                    cols = { _nc(c): c for c in bom_df.columns }
+                    def _pick(cands):
+                        for c in cands:
+                            key=_nc(c)
+                            if key in cols:
+                                return cols[key]
+                        return None
+                    parent_col = _pick(["root article","rootarticle","parent","parent_item","parentitem","item_id","item","article"])
+                    comp_col = _pick(["article","item","item_id","component_id","component","child","rootarticle","root"])
+                    if parent_col == comp_col:
+                        comp_col = _pick(["article","item","component","component_id","child"])
+                    qty_col = _pick(["qty_per_parent","qtyperparent","qty_per","qtyper","qty","quantity","amount"])
+                    if parent_col and comp_col:
+                        tmp = bom_df[[parent_col, comp_col] + ([qty_col] if qty_col else [])].copy()
+                        tmp[parent_col] = tmp[parent_col].astype(str)
+                        tmp[comp_col] = tmp[comp_col].astype(str)
+                        if qty_col:
+                            tmp[qty_col] = pd.to_numeric(tmp[qty_col], errors="coerce").fillna(0.0)
+                        else:
+                            tmp[qty_col] = 1.0
+                        tmp = tmp[(tmp[parent_col]!="") & (tmp[comp_col]!="")]
+                        for _, r in tmp.iterrows():
+                            par = r[parent_col]
+                            ch = r[comp_col]
+                            q = float(r[qty_col] or 0.0)
+                            key = (str(par), str(ch))
+                            prev = bom_map.get(key)
+                            if prev is None or q > prev:
+                                bom_map[key] = q
+            except Exception:
+                pass
+
+            snap_row = s.execute(text("SELECT id, taken_at FROM stock_snapshot ORDER BY taken_at DESC LIMIT 1")).fetchone()
+            stock_snapshot_id = snap_row[0] if snap_row else None
+            stock_snapshot_taken_at = str(snap_row[1]) if snap_row and snap_row[1] is not None else None
+            stock_map = {}
+            if stock_snapshot_id is not None:
+                stock_rows = s.execute(
+                    text(
+                        "SELECT item_id, COALESCE(workshop,'') AS workshop, stock_qty FROM stock_line WHERE snapshot_id = :sid"
+                    ),
+                    {"sid": stock_snapshot_id},
+                ).mappings().all()
+                for sr in stock_rows:
+                    stock_map[(str(sr["item_id"]), str(sr["workshop"]))] = float(sr.get("stock_qty") or 0.0)
+            stock_total_by_item: dict[str, float] = defaultdict(float)
+            for (iid, _wk), qty in stock_map.items():
+                stock_total_by_item[str(iid)] += float(qty or 0.0)
+
+            try:
+                df_date_from = pd.to_datetime(date_from).date() if date_from else None
+            except Exception:
+                df_date_from = None
+            try:
+                df_date_to = pd.to_datetime(date_to).date() if date_to else None
+            except Exception:
+                df_date_to = None
+
+            def bucket_date(d: dt.date) -> dt.date:
+                if period == "week":
+                    return d - dt.timedelta(days=d.weekday())
+                if period == "month":
+                    return d.replace(day=1)
+                return d
+
+            prepared = {}
+            for _, r in orders.iterrows():
+                child_item = str(r["item_id"])
+                base_item = str(r["base_item"])
+                base = str(r["base_order_id"])
+                if child_item == base_item:
+                    continue
+                parent_base_row = parent_by_base.get(base)
+                parents_info = []
+                seen_parents: set[str] = set()
+                for (p, c), q in bom_map.items():
+                    if c != child_item:
+                        continue
+                    match = orders[(orders["base_order_id"] == base) & (orders["item_id"] == p)]
+                    if match.empty:
+                        continue
+                    parent_row = match.iloc[0]
+                    pid = str(p)
+                    if pid in seen_parents:
+                        continue
+                    seen_parents.add(pid)
+                    parents_info.append((parent_row, float(q or 0.0) or 1.0, pid))
+                if not parents_info and parent_base_row is not None:
+                    pr = parent_base_row
+                    if isinstance(pr, pd.Series):
+                        pr = pr.to_dict()
+                    qty_per = (
+                        bom_map.get((str(pr.get("item_id")), child_item))
+                        or bom_map.get((base_item, child_item))
+                        or (max([q for (p, c), q in bom_map.items() if c == child_item], default=0.0) or None)
+                        or 1.0
+                    )
+                    parents_info.append((pr, float(qty_per or 1.0), str(pr.get("item_id") or base_item)))
+                for parent_row, qty_per, parent_item_id in parents_info:
+                    parent = parent_row
+                    if isinstance(parent_row, pd.Series):
+                        parent_row = parent_row.to_dict()
+                    if isinstance(parent, pd.Series):
+                        parent = parent.to_dict()
+                    parent_qty = float(parent_row.get("qty") or 0.0)
+                    duration = int(parent_row.get("duration_days") or 1)
+                    if duration < 1:
+                        duration = 1
+                    if qty_per is None:
+                        qty_per = (
+                            bom_map.get((parent_item_id, child_item))
+                            or bom_map.get((base_item, child_item))
+                            or (max([q for (p, c), q in bom_map.items() if c == child_item], default=0.0) or None)
+                            or 1.0
+                        )
+                    per_day = parent_qty * float(qty_per) / float(duration)
+                    parent_start = (parent_row or {}).get("start_date") or (parent or {}).get("start_date")
+                    parent_end = (parent_row or {}).get("end_date") or (parent or {}).get("end_date")
+                    if parent_start is None or parent_end is None:
+                        continue
+                    start_date = pd.to_datetime(parent_start).date()
+                    end_date = pd.to_datetime(parent_end).date()
+                    dates = pd.date_range(start_date, end_date, freq="D").date
+                    target_wk = str((parent_row or {}).get("workshop") or (parent or {}).get("workshop") or "")
+                    key = (child_item, target_wk)
+                    bucket = prepared.get(key, defaultdict(float))
+                    for d in dates:
+                        if df_date_from and d < df_date_from:
+                            continue
+                        if df_date_to and d > df_date_to:
+                            continue
+                        b = bucket_date(d)
+                        bucket[b] += float(per_day)
+                    prepared[key] = bucket
+
+            rows_raw = []
+            all_buckets: set[dt.date] = set()
+            for (item_id, target_wk), plan_bucket in prepared.items():
+                if not plan_bucket:
+                    continue
+                source_wk = item_workshop.get(item_id)
+                # Workshop filter applies only to source workshop
+                if wk_tokens and not _match_workshop(source_wk):
+                    continue
+                all_buckets.update(plan_bucket.keys())
+                total_stock = stock_total_by_item.get(item_id, 0.0)
+                source_stock = (
+                    stock_map[(item_id, str(source_wk or ""))]
+                    if (item_id, str(source_wk or "")) in stock_map
+                    else total_stock
+                )
+                target_stock = (
+                    stock_map[(item_id, str(target_wk or ""))]
+                    if (item_id, str(target_wk or "")) in stock_map
+                    else total_stock
+                )
+                rows_raw.append(
+                    {
+                        "item_id": item_id,
+                        "item_name": item_name.get(item_id),
+                        "source_workshop": source_wk or "",
+                        "target_workshop": target_wk or "",
+                        "stock_source": float(source_stock),
+                        "stock_target": float(target_stock),
+                        "plan": plan_bucket,
+                    }
+                )
+
+            # Aggregate across all target workshops into a single row per item
+            if rows_raw:
+                aggregated = {}
+                for r in rows_raw:
+                    iid = str(r.get("item_id"))
+                    agg = aggregated.get(iid)
+                    if agg is None:
+                        agg = {
+                            "item_id": iid,
+                            "item_name": r.get("item_name"),
+                            "source_workshop": r.get("source_workshop") or "",
+                            "target_workshops": set(),
+                            "target_workshop": "",
+                            "stock_source": float(r.get("stock_source") or 0.0),
+                            "stock_target": 0.0,
+                            "plan": defaultdict(float),
+                        }
+                        aggregated[iid] = agg
+                    if r.get("target_workshop"):
+                        agg["target_workshops"].add(str(r.get("target_workshop")))
+                    agg["stock_target"] += float(r.get("stock_target") or 0.0)
+                    for k, v in (r.get("plan") or {}).items():
+                        agg["plan"][k] += float(v or 0.0)
+                for agg in aggregated.values():
+                    tset = agg.pop("target_workshops", set())
+                    if len(tset) == 1:
+                        agg["target_workshop"] = next(iter(tset))
+                    elif len(tset) > 1:
+                        agg["target_workshop"] = ", ".join(sorted(tset))
+                rows_raw = list(aggregated.values())
+
+            # If items filter was provided, keep only matching items (after aggregation)
+            if item_filter:
+                rows_raw = [r for r in rows_raw if str(r.get("item_id", "")).lower() in item_filter]
+
+            if not rows_raw or not all_buckets:
+                return {
+                    "period": period,
+                    "dates": [],
+                    "rows": [],
+                    "stock_snapshot_id": stock_snapshot_id,
+                    "stock_snapshot_taken_at": stock_snapshot_taken_at,
+                }
+
+            sorted_buckets = sorted(all_buckets)
+            for row in rows_raw:
+                remaining = float(row.get("stock_target") or 0.0)
+                deficit = {}
+                cum = 0.0
+                for b in sorted_buckets:
+                    need = float(row["plan"].get(b, 0.0) or 0.0)
+                    if remaining >= need:
+                        remaining -= need
+                    else:
+                        deficit_val = need - remaining
+                        remaining = 0.0
+                        cum += deficit_val
+                    deficit[b] = cum
+                row["deficit"] = deficit
+
+            return {
+                "period": period,
+                "dates": sorted_buckets,
+                "rows": rows_raw,
+                "stock_snapshot_id": stock_snapshot_id,
+                "stock_snapshot_taken_at": stock_snapshot_taken_at,
+            }
+    except Exception as e:
+        tb = traceback.format_exc(limit=3)
+        raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
+
+@app.get("/reports/plans/{plan_id}/transfer_deficit")
+def report_transfer_deficit(
+    plan_id: int,
+    items: Optional[List[str]] = Query(default=None, description="Артикулы, можно списком через запятую или перенос"),
+    workshops: Optional[List[str]] = Query(default=None, description="Цеха-числа для фильтрации источника/получателя"),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    period: str = "day",
+):
+    res = _compute_transfer_deficit(plan_id, items=items, workshops=workshops, date_from=date_from, date_to=date_to, period=period)
+    dates = res.get("dates") or []
+    rows_json = []
+    for r in res.get("rows", []):
+        def _to_dict(src: dict) -> dict:
+            return {str(k): float(src.get(k, 0.0)) for k in dates}
+        rows_json.append(
+            {
+                "item_id": r.get("item_id"),
+                "item_name": r.get("item_name"),
+                "source_workshop": r.get("source_workshop"),
+                "target_workshop": r.get("target_workshop"),
+                "stock_source": float(r.get("stock_source") or 0.0),
+                "stock_target": float(r.get("stock_target") or 0.0),
+                "plan": _to_dict(r.get("plan", {})),
+                "deficit": _to_dict(r.get("deficit", {})),
+            }
+        )
+    return {
+        "status": "ok",
+        "period": res.get("period"),
+        "dates": [str(d) for d in dates],
+        "rows": rows_json,
+        "stock_snapshot_id": res.get("stock_snapshot_id"),
+        "stock_snapshot_taken_at": res.get("stock_snapshot_taken_at"),
+    }
+
+@app.post("/reports/plans/{plan_id}/transfer_deficit/export")
+def export_transfer_deficit(plan_id: int, body: TransferDeficitExport):
+    res = _compute_transfer_deficit(
+        plan_id,
+        items=body.items,
+        workshops=body.workshops,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        period=body.period or "day",
+    )
+    dates = res.get("dates") or []
+    rows = res.get("rows") or []
+    if not dates or not rows:
+        return {"status": "ok", "path": None, "rows": 0}
+    out_path = body.out_path or os.path.join("out", "transfer_deficit.xlsx")
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    cols = [
+        "Артикул",
+        "Наименование",
+        "Цех",
+        "Цех получатель",
+        "Запас на цехе",
+        "Запас на цехе получателе",
+        "Тип",
+    ] + [str(d) for d in dates]
+    data = []
+    for r in rows:
+        base = [
+            r.get("item_id"),
+            r.get("item_name") or "",
+            r.get("source_workshop") or "",
+            r.get("target_workshop") or "",
+            float(r.get("stock_source") or 0.0),
+            float(r.get("stock_target") or 0.0),
+        ]
+        plan_vals = [float(r.get("plan", {}).get(d, 0.0) or 0.0) for d in dates]
+        deficit_vals = [float(r.get("deficit", {}).get(d, 0.0) or 0.0) for d in dates]
+        data.append(base + ["План к перемещению"] + plan_vals)
+        data.append(["", "", "", "", "", ""] + ["Накопительный дефицит"] + deficit_vals)
+    pd.DataFrame(data, columns=cols).to_excel(out_path, index=False)
+    return {"status": "ok", "path": out_path, "rows": len(rows)}

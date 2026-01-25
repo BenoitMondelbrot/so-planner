@@ -1281,19 +1281,22 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
             cur = p
         return out
 
-    def descendants_with_factor(x: str) -> list[tuple[str, float]]:
+    def descendants_with_factor(x: str) -> list[tuple[str, float, str]]:
+        """
+        Возвращаем всех потомков с накопленным коэффициентом.
+        Глобально не дедупим, чтобы ребёнок мог прийти по нескольким родительским веткам;
+        цикл обрываем только по текущему пути.
+        """
         out = []
-        stack = [(x, 1.0)]
-        seen = set([x])
+        stack = [(x, 1.0, {x})]  # cur, factor, path
         while stack:
-            cur, f = stack.pop()
+            cur, f, path = stack.pop()
             for ch, r in (children_map.get(cur, {}) or {}).items():
-                if ch in seen:
+                if ch in path:
                     continue
                 f_new = f * (r if np.isfinite(r) and r > 0 else 1.0)
-                out.append((ch, f_new))
-                seen.add(ch)
-                stack.append((ch, f_new))
+                out.append((ch, f_new, cur))
+                stack.append((ch, f_new, path | {ch}))
         return out
 
     rows = []
@@ -1318,11 +1321,12 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
                 item_id=a, due_date=due, qty=qty, priority=pr, role="PARENT"
             ))
         # потомки (масштабируем вниз)
-        for d, fmul in descendants_with_factor(it):
+        for d, fmul, parent in descendants_with_factor(it):
             rows.append(dict(
                 base_order_id=base_oid,
                 order_id=(f"{base_oid}:{d}" if split_child_orders else base_oid),
-                item_id=d, due_date=due, qty=int(round(qty * float(fmul))), priority=pr, role="CHILD"
+                item_id=d, due_date=due, qty=int(round(qty * float(fmul))), priority=pr, role="CHILD",
+                parent_item_id=str(parent)
             ))
 
     exp = pd.DataFrame(rows)
@@ -1364,11 +1368,7 @@ def greedy_schedule(
         start_date = dt.date.today()
     warnings: list[str] = []   # ← будем собирать предупреждения для UI/логов
 
-    # === 0) Подготовка входных данных и иерархии ===
-    if expand:
-        demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=include_parents)
-    print("[GREEDY DEBUG] expanded_demand rows:", len(demand))
-    # --- map item -> workshop (from BOM)
+    # --- map item -> workshop (from BOM); используется для складов и маршрутизации
     item_workshop = {}
     if "workshop" in bom.columns:
         try:
@@ -1380,7 +1380,67 @@ def greedy_schedule(
             item_workshop = {}
     else:
         item_workshop = {}
-    # === STOCK CONSUMPTION (apply to all levels FG/PARENT/CHILD) ===
+
+    # Если есть склад, сначала гасим спрос по родителю до разворота BOM,
+    # чтобы не плодить дочерние заказы на объёмы, уже закрытые готовой продукцией.
+    if expand and stock_map:
+        smap_prefilter = {}
+        for k, v in stock_map.items():
+            if isinstance(k, tuple) and len(k) == 2:
+                smap_prefilter[(str(k[0]), str(k[1]))] = float(v or 0.0)
+            else:
+                smap_prefilter[str(k)] = float(v or 0.0)
+
+        pre_rows = []
+        demand_sorted = demand.sort_values(["priority","item_id"], kind="stable").reset_index(drop=True)
+        demand_cols = list(demand.columns)
+        for r in demand_sorted.itertuples(index=False):
+            q = int(getattr(r, "qty", 0) or 0)
+            if q <= 0:
+                continue
+            item = str(getattr(r, "item_id"))
+            wk = item_workshop.get(item, "")
+            needed = q
+            tried = []
+            for key in ((item, wk), (item, ""), item):
+                if key in tried:
+                    continue
+                tried.append(key)
+                avail = smap_prefilter.get(key, 0.0)
+                if avail <= 0:
+                    continue
+                take = min(needed, int(avail))
+                smap_prefilter[key] = avail - take
+                needed -= take
+                if needed <= 0:
+                    break
+            if needed > 0:
+                row = {c: getattr(r, c) for c in demand_cols if hasattr(r, c)}
+                if "workshop" in demand_cols and (row.get("workshop") in (None, "", pd.NA)):
+                    row["workshop"] = wk
+                row["qty"] = int(needed)
+                pre_rows.append(row)
+        demand = pd.DataFrame(pre_rows, columns=demand_cols) if pre_rows else demand.iloc[0:0]
+        stock_map = smap_prefilter  # остаток пойдёт ниже (на дочерние уровни)
+
+    # Карта родителя по BOM (нужна, чтобы гасить ветки, если родитель закрыт складом)
+    parent_lookup: dict[str, set[str]] = {}
+    if "root_item_id" in bom.columns:
+        try:
+            tmp = bom[["item_id", "root_item_id"]].dropna()
+            for r in tmp.itertuples(index=False):
+                ch = str(r.item_id)
+                par = str(r.root_item_id)
+                if par and par != ch:
+                    parent_lookup.setdefault(ch, set()).add(par)
+        except Exception:
+            parent_lookup = {}
+
+    # === 0) Подготовка входных данных и иерархии ===
+    if expand:
+        demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=include_parents)
+    print("[GREEDY DEBUG] expanded_demand rows:", len(demand))
+    # === STOCK CONSUMPTION (apply to all levels FG/PARENT/CHILD with proportional scaling) ===
     if stock_map:
         # normalize stock map keys to tuple (item, workshop) or str item for legacy
         smap = {}
@@ -1390,17 +1450,32 @@ def greedy_schedule(
             else:
                 smap[str(k)] = float(v or 0.0)
 
-        adjusted = []
+        # scale_product: сколько долей исходного qty реально идёт в производство для каждого item (per base_order_id)
+        scale_product = defaultdict(dict)  # base_oid -> {item_id -> fraction_of_original}
+        adjusted_map: dict[tuple[object, ...], dict] = {}
         demand = demand.sort_values(["priority","depth","item_id"], kind="stable").reset_index(drop=True)
         for r in demand.itertuples(index=False):
             item = str(r.item_id)
             wk = item_workshop.get(item, "")
-            q = int(r.qty) if not pd.isna(r.qty) else 0
-            if q <= 0:
+            base_oid = str(getattr(r, "base_order_id", r.order_id))
+            q_orig = float(r.qty) if not pd.isna(r.qty) else 0.0
+            if q_orig <= 0:
+                continue
+
+            par = str(getattr(r, "parent_item_id", "") or "")
+            if not par:
+                parents_set = parent_lookup.get(item, set())
+                # если несколько родителей, берём max долю выпуска среди них (агрегируем ниже)
+                parent_scale = max((scale_product[base_oid].get(p, 1.0) for p in parents_set), default=1.0)
+            else:
+                parent_scale = scale_product[base_oid].get(par, 1.0) if par else 1.0
+            required = q_orig * parent_scale
+            if required <= 0:
+                scale_product[base_oid][item] = 0.0
                 continue
 
             # try to consume stock: exact (item, wk) -> generic (item, "") -> legacy item -> any other workshop for item
-            needed = q
+            needed = required
             tried_keys = []
             for key in ((item, wk), (item, ""), item):
                 if key in tried_keys:
@@ -1409,7 +1484,7 @@ def greedy_schedule(
                 avail = smap.get(key, 0.0)
                 if avail <= 0:
                     continue
-                take = min(needed, int(avail))
+                take = min(needed, float(avail))
                 smap[key] = avail - take
                 needed -= take
                 if needed <= 0:
@@ -1421,28 +1496,52 @@ def greedy_schedule(
                     if isinstance(key, tuple) and len(key) == 2 and str(key[0]) == item and key not in tried_keys:
                         if avail <= 0:
                             continue
-                        take = min(needed, int(avail))
+                        take = min(needed, float(avail))
                         smap[key] = avail - take
                         needed -= take
                         if needed <= 0:
                             break
 
-            if needed <= 0:
+            produced = max(needed, 0.0)
+            # produced сейчас = остаток после списания склада; считаем долю от исходного q_orig,
+            # чтобы потомки учитывали, что родителя частично закрыли складом/получениями.
+            base_qty = q_orig if np.isfinite(q_orig) else 0.0
+            frac = produced / base_qty if base_qty > 1e-9 else 0.0
+            frac = max(0.0, min(1.0, frac))
+            scale_product[base_oid][item] = frac
+
+            if produced <= 1e-9:
                 continue  # fully covered by stock
-            q_prod = needed
+            q_prod = int(round(produced))
 
             if q_prod > 0:
-                adjusted.append(dict(
-                    base_order_id=getattr(r, "base_order_id", r.order_id),
-                    order_id=r.order_id,
-                    item_id=item,
-                    due_date=r.due_date,
-                    qty=int(q_prod),
-                    priority=r.priority,
-                    role=getattr(r, "role", "FG"),
-                    depth=getattr(r, "depth", 0),
-                    workshop=wk,
-                ))
+                key = (
+                    base_oid,
+                    str(r.order_id),
+                    item,
+                    r.due_date,
+                    r.priority,
+                    getattr(r, "role", "FG"),
+                    getattr(r, "depth", 0),
+                    wk,
+                    str(getattr(r, "customer", "") or ""),
+                )
+                if key not in adjusted_map:
+                    adjusted_map[key] = dict(
+                        base_order_id=base_oid,
+                        order_id=str(r.order_id),
+                        item_id=item,
+                        due_date=r.due_date,
+                        qty=0,
+                        priority=r.priority,
+                        role=getattr(r, "role", "FG"),
+                        depth=getattr(r, "depth", 0),
+                        workshop=wk,
+                        customer=str(getattr(r, "customer", "") or ""),
+                    )
+                adjusted_map[key]["qty"] += q_prod
+
+        adjusted = list(adjusted_map.values())
         demand = pd.DataFrame(adjusted) if adjusted else demand.iloc[0:0]
 
     if len(demand) == 0:
@@ -2068,6 +2167,41 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
         ws_util.conditional_formatting.add(cell_range, rule)
         ws_util.freeze_panes = "B2"
 
+    # Orders rollup (per order_id/item_id/workshop)
+    ws_orders = wb.create_sheet("Orders")
+    ws_orders.append(["order_id", "item_id", "workshop", "qty", "date_start", "date_finish"])
+    try:
+        df_orders = sched.copy()
+        if "order_id" not in df_orders.columns or "item_id" not in df_orders.columns or "date" not in df_orders.columns:
+            raise ValueError("missing core columns")
+        if "workshop" not in df_orders.columns:
+            df_orders["workshop"] = ""
+        df_orders = df_orders.dropna(subset=["order_id", "item_id"])
+        df_orders["date"] = pd.to_datetime(df_orders["date"], errors="coerce")
+        df_orders = df_orders.dropna(subset=["date"])
+        df_orders["qty"] = pd.to_numeric(df_orders.get("qty", 0), errors="coerce").fillna(0.0)
+        # qty of the order (not sum of all ops): take max to avoid double counting across steps/days
+        grouped = df_orders.groupby(["order_id", "item_id", "workshop"], as_index=False).agg(
+            qty=("qty", "max"),
+            date_start=("date", "min"),
+            date_finish=("date", "max"),
+        )
+        grouped["date_start"] = pd.to_datetime(grouped["date_start"]).dt.date
+        grouped["date_finish"] = pd.to_datetime(grouped["date_finish"]).dt.date
+        grouped = grouped.sort_values(["order_id", "item_id", "date_start"], kind="stable")
+        for _, r in grouped.iterrows():
+            ws_orders.append([
+                r.get("order_id", ""),
+                r.get("item_id", ""),
+                r.get("workshop", ""),
+                float(r.get("qty", 0.0)),
+                r.get("date_start", ""),
+                r.get("date_finish", ""),
+            ])
+    except Exception:
+        pass
+    _auto_width(ws_orders)
+
     orders = compute_orders_timeline(sched)
     ws_otl = wb.create_sheet("orders_timeline")
     ws_otl.append(["order_id","item_id","start_date","finish_date","duration_days","due_date","finish_lag"])
@@ -2243,10 +2377,7 @@ def run_pipeline(
     bom = load_bom(Path(bom_path))
     machines = load_machines(Path(machines_path))
 
-    # 2) Expand demand by BOM hierarchy (qty_per_parent applies only to descendants)
-    demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders)
-
-    # 3) Optional stock
+    # 2) Optional stock
     stock_map = None
     if stock_path:
         try:
@@ -2265,7 +2396,7 @@ def run_pipeline(
             print("[GREEDY WARN] stock load failed:", e)
             stock_map = None
 
-    # 4) Start date
+    # 3) Start date
     start = None
     if start_date:
         try:
@@ -2273,7 +2404,7 @@ def run_pipeline(
         except Exception:
             start = None
 
-    # 5) Schedule
+    # 4) Schedule
     sched = greedy_schedule(
         demand, bom, machines,
         start_date=start,
@@ -2284,7 +2415,7 @@ def run_pipeline(
         include_parents=(mode == "standard_up"),
     )
 
-    # 6) Export
+    # 5) Export
     export_with_charts._machines_df = machines  # pass through for charts if needed
     out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
     return out_file, sched
@@ -3156,42 +3287,31 @@ def run_pipeline(
             print("[NETTING] export failed:", e)
         return out_file, sched
 
-    # -------- Standard pipeline (with optional two-phase stock netting) --------
+    # -------- Standard pipeline (one-pass; stock is consumed inside greedy_schedule) --------
     plan = load_plan_of_sales(Path(plan_path))
+    demand = build_demand(plan)
     bom = load_bom(Path(bom_path))
     machines = load_machines(Path(machines_path))
 
-    # If stock file provided, perform two-phase netting like Product View (no receipts):
-    # 1) Net FG plan by stock -> residual FG orders; 2) schedule expanded residuals.
-    demand: pd.DataFrame
-    did_netting = False
+    stock_map = None
     if stock_path:
         try:
             stock_df = load_stock_any(Path(stock_path))
+            if "workshop" not in stock_df.columns:
+                stock_df["workshop"] = ""
+            stock_df = stock_df.assign(
+                item_id=lambda x: x["item_id"].astype(str),
+                workshop=lambda x: x["workshop"].astype(str),
+            )
+            stock_map = {
+                (str(r.item_id), str(r.workshop)): float(r.stock_qty)
+                for r in stock_df.groupby(["item_id","workshop"], as_index=False)["stock_qty"].sum().itertuples(index=False)
+            }
         except Exception as e:
             print("[GREEDY WARN] stock load failed:", e)
-            stock_df = pd.DataFrame(columns=["item_id","stock_qty","workshop"])
-        try:
-            demand_net = product_view_generate_demand(plan_df=plan, bom=bom, stock_df=stock_df, existing_orders_df=None)
-            # Use netted orders directly to avoid creating artificial FG for components
-            demand = demand_net.copy()
-            stock_map = None  # already netted
-            did_netting = True
-        except Exception as e:
-            print("[GREEDY WARN] product_view-like netting failed, fallback to one-pass:", e)
-            demand = build_demand(plan)
-            # build legacy stock_map for greedy fallback
             stock_map = None
-            try:
-                if not stock_df.empty:
-                    if "workshop" not in stock_df.columns:
-                        stock_df["workshop"] = ""
-                    stock_map = { (str(r.item_id), str(r.workshop)): float(r.stock_qty) for r in stock_df.itertuples(index=False) }
-            except Exception:
-                stock_map = None
-    else:
-        demand = build_demand(plan)
-        stock_map = None
+
+    did_netting = False
 
     start = None
     if start_date:
@@ -3412,19 +3532,22 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
             cur = p
         return out
 
-    def descendants_with_factor(x: str) -> list[tuple[str, float]]:
-        out: list[tuple[str, float]] = []
-        stack: list[tuple[str, float]] = [(x, 1.0)]
-        seen: set[str] = {x}
+    def descendants_with_factor(x: str) -> list[tuple[str, float, str]]:
+        """
+        Возвращаем всех потомков с накопленным коэффициентом.
+        Не используем глобальное dedуп, чтобы ребёнок мог прийти через нескольких родителей;
+        цикл режем только по текущему пути.
+        """
+        out: list[tuple[str, float, str]] = []
+        stack: list[tuple[str, float, set[str]]] = [(x, 1.0, {x})]
         while stack:
-            cur, f = stack.pop()
+            cur, f, path = stack.pop()
             for ch, r in (children_map.get(cur, {}) or {}).items():
-                if ch in seen:
+                if ch in path:
                     continue
                 f_new = f * (r if np.isfinite(r) and r > 0 else 1.0)
-                out.append((ch, f_new))
-                seen.add(ch)
-                stack.append((ch, f_new))
+                out.append((ch, f_new, cur))
+                stack.append((ch, f_new, path | {ch}))
         return out
 
     rows: list[dict[str, object]] = []
@@ -3458,7 +3581,7 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
                     "role": "PARENT",
                     "customer": (str(cust) if cust is not None else None),
                 })
-        for d, fmul in descendants_with_factor(it):
+        for d, fmul, parent in descendants_with_factor(it):
             rows.append({
                 "base_order_id": base_oid,
                 "order_id": (f"{base_oid}:{d}" if split_child_orders else base_oid),
@@ -3468,6 +3591,7 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
                 "priority": pr,
                 "role": "CHILD",
                 "customer": (str(cust) if cust is not None else None),
+                "parent_item_id": str(parent),
             })
 
     exp = pd.DataFrame(rows)
