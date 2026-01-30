@@ -23,8 +23,15 @@ def product_view_generate_demand(
     *,
     stock_df: pd.DataFrame | None = None,
     existing_orders_df: pd.DataFrame | None = None,
+    fixed_orders_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    return _product_view_generate_demand(plan_df, bom, stock_df=stock_df, existing_orders_df=existing_orders_df)
+    return _product_view_generate_demand(
+        plan_df,
+        bom,
+        stock_df=stock_df,
+        existing_orders_df=existing_orders_df,
+        fixed_orders_df=fixed_orders_df,
+    )
 
 
 def ensure_netting_tables(db: Session) -> None:
@@ -57,4 +64,3 @@ __all__ = [
     "load_stock_snapshot",
     "save_netting_results_to_db",
 ]
-

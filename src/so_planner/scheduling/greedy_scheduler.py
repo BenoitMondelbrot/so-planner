@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Greedy-планировщик для so-planner (совместим с API, вашими Excel и старым вызовом с Session).
 """
@@ -1050,124 +1050,6 @@ def product_view_generate_demand(
     return pd.DataFrame(out_orders, columns=["order_id","item_id","due_date","qty","priority","workshop"])
 
 
-
-# === Unified pipeline with mode='product_view' =================================
-def run_pipeline(
-    plan_path,
-    bom_path,
-    machines_path,
-    out_xlsx,
-    stock_path=None,
-    start_date=None,
-    overload_pct: float = 0.0,
-    split_child_orders: bool = True,
-    align_roots_to_due: bool = True,
-    mode: str = "",
-):
-    """
-    Backward compatible pipeline.
-    mode == 'product_view' -> do Product-View netting then call greedy_schedule.
-    Otherwise -> delegate to original pipeline.
-    """
-    mode = (mode or "").lower().strip()
-    # Optional kwargs for product_view mode
-    receipts_from = str((kwargs or {}).get("receipts_from", "plan"))
-    if mode != "product_view":
-        return _orig_run_pipeline(
-            plan_path, bom_path, machines_path, out_xlsx,
-            stock_path=stock_path, start_date=start_date,
-            overload_pct=overload_pct,
-            split_child_orders=split_child_orders,
-            align_roots_to_due=align_roots_to_due,
-        )
-
-    # --- Product View path ---
-    plan = load_plan_of_sales(Path(plan_path))
-    bom = load_bom(Path(bom_path))
-    machines = load_machines(Path(machines_path))
-
-    stock_df = None
-    if stock_path:
-        stock_df = load_stock_any(Path(stock_path))
-        if stock_df is not None and "workshop" not in stock_df.columns:
-            stock_df["workshop"] = ""
-
-    # existing receipts from current out_xlsx (if present)
-    existing_orders = None
-    p = Path(out_xlsx)
-    if p.exists():
-        try:
-            tmp = pd.read_excel(p, sheet_name="schedule")
-            keep = [c for c in ["item_id","due_date","qty","workshop"] if c in tmp.columns]
-            existing_orders = tmp[keep].copy() if keep else None
-        except Exception:
-            existing_orders = None
-
-    # netting -> delta-orders
-    demand_net = product_view_generate_demand(plan, bom, stock_df=stock_df, existing_orders_df=existing_orders)
-
-    # convert to demand DF compatible with the existing pipeline
-    demand = build_demand(demand_net)
-
-    # optional: expand hierarchy here if твой build_demand не делает это сам
-    demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=False)
-
-    # JIT alignment preserved
-    start = None
-    if start_date:
-        try:
-            start = pd.to_datetime(start_date).date()
-        except Exception:
-            start = None
-
-    # Do NOT re-consume stock here (already netted)
-    sched = greedy_schedule(
-        demand, bom, machines,
-        start_date=start,
-        overload_pct=overload_pct,
-        split_child_orders=split_child_orders,
-        align_roots_to_due=align_roots_to_due,
-        stock_map=None,
-    )
-
-    export_with_charts._machines_df = machines
-    out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
-    return out_file, sched
-
-
-def run_greedy(*args, **kwargs):
-    """
-    Backward-compatible wrapper:
-    - if mode='product_view' -> call our run_pipeline (above)
-    - else -> delegate to original run_greedy()
-    """
-    mode = (kwargs.get("mode") or "").lower().strip()
-    if mode != "product_view":
-        return _orig_run_greedy(*args, **kwargs)
-
-    # Build params in a backward compatible way
-    plan_path     = kwargs.get("plan_path")
-    bom_path      = kwargs.get("bom_path")
-    machines_path = kwargs.get("machines_path")
-    out_xlsx      = kwargs.get("out_xlsx")
-    stock_path    = kwargs.get("stock_path")
-    start_date    = kwargs.get("start_date")
-    overload_pct  = float(kwargs.get("overload_pct", 0.0))
-    split_child_orders = bool(kwargs.get("split_child_orders", True))
-    align_roots_to_due = bool(kwargs.get("align_roots_to_due", True))
-
-    return run_pipeline(
-        plan_path=plan_path,
-        bom_path=bom_path,
-        machines_path=machines_path,
-        out_xlsx=out_xlsx,
-        stock_path=stock_path,
-        start_date=start_date,
-        overload_pct=overload_pct,
-        split_child_orders=split_child_orders,
-        align_roots_to_due=align_roots_to_due,
-        mode="product_view",
-    )
 
 
     def C(df, name):  # безопасный доступ к столбцам в любом регистре
@@ -2319,250 +2201,6 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
 # =========================
 
 
-def run_pipeline(
-    plan_path,
-    bom_path,
-    machines_path,
-    out_xlsx,
-    stock_path=None,
-    start_date=None,
-    overload_pct: float = 0.0,
-    split_child_orders: bool = True,
-    align_roots_to_due: bool = True,
-    mode: str = "",
-):
-
-
-        # --- Product View netting branch (активируется только при mode="product_view")
-    _mode = str(locals().get("mode", "")).lower().strip()
-    if _mode == "product_view":
-        from pathlib import Path as _P
-
-        # существующие поступления: берём из out_xlsx (или оставь как хочешь)
-        _existing = None
-        try:
-            if _P(out_xlsx).exists():
-                _dfx = pd.read_excel(_P(out_xlsx), sheet_name="schedule")
-                _keep = [c for c in ["item_id","due_date","qty","workshop"] if c in _dfx.columns]
-                _existing = _dfx[_keep].copy() if _keep else None
-        except Exception:
-            _existing = None
-
-        # склад
-        _stock_df = None
-        if stock_path:
-            _stock_df = load_stock_any(_P(stock_path))
-            if _stock_df is not None and "workshop" not in _stock_df.columns:
-                _stock_df["workshop"] = ""
-
-        # входы
-        plan = load_plan_of_sales(_P(plan_path))
-        bom  = load_bom(_P(bom_path))
-        machines = load_machines(_P(machines_path))
-
-        # неттинг → заказы на дельту
-        demand_net = product_view_generate_demand(plan, bom, stock_df=_stock_df, existing_orders_df=_existing)
-
-        # строим demand в твоём формате и идём дальше обычным путём
-        demand = build_demand(demand_net)
-        stock_map = None  # склад уже учли в неттинге
-
-    """
-    End-to-end pipeline: load inputs -> expand demand -> schedule -> export.
-    Keeps backward-compatible API.
-    """
-    # 1) Load inputs
-    plan = load_plan_of_sales(Path(plan_path))   # wide → long
-    demand = build_demand(plan)
-    bom = load_bom(Path(bom_path))
-    machines = load_machines(Path(machines_path))
-
-    # 2) Optional stock
-    stock_map = None
-    if stock_path:
-        try:
-            _stock_df = load_stock_any(Path(stock_path))
-            # support optional workshop column
-            if "workshop" not in _stock_df.columns:
-                _stock_df["workshop"] = ""
-            # aggregate duplicates per (item, workshop) before mapping to dict
-            _stock_df = (_stock_df
-                         .assign(item_id=lambda x: x["item_id"].astype(str),
-                                 workshop=lambda x: x["workshop"].astype(str))
-                         .groupby(["item_id","workshop"], as_index=False)["stock_qty"].sum())
-            stock_map = { (str(r.item_id), str(r.workshop)): float(r.stock_qty)
-                          for r in _stock_df.itertuples(index=False) }
-        except Exception as e:
-            print("[GREEDY WARN] stock load failed:", e)
-            stock_map = None
-
-    # 3) Start date
-    start = None
-    if start_date:
-        try:
-            start = pd.to_datetime(start_date).date()
-        except Exception:
-            start = None
-
-    # 4) Schedule
-    sched = greedy_schedule(
-        demand, bom, machines,
-        start_date=start,
-        overload_pct=overload_pct,
-        split_child_orders=split_child_orders,
-        align_roots_to_due=align_roots_to_due,
-        stock_map=stock_map,
-        include_parents=(mode == "standard_up"),
-    )
-
-    # 5) Export
-    export_with_charts._machines_df = machines  # pass through for charts if needed
-    out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
-    return out_file, sched
-
-def run_greedy(*args: Any, **kwargs: Any) -> Tuple[str, pd.DataFrame]:
-    """
-    Гибкая обёртка вокруг run_pipeline:
-    - понимает позиционные/именованные аргументы,
-    - глотает лишние флаги (в т.ч. guard_limit_days),
-    - при save_to_plan_id + db сохраняет в БД.
-    Возвращает (out_xlsx, sched_df).
-    """
-    # спец-параметры
-    save_to_plan_id = kwargs.pop("save_to_plan_id", None)
-    db = kwargs.pop("db", None) or kwargs.pop("session", None)
-
-    # 1) Нормализация входных аргументов до любых других действий
-    if "stock" in kwargs and "stock_path" not in kwargs:
-        kwargs["stock_path"] = kwargs.pop("stock")
-
-    # 2) Хелпер для определения SQLAlchemy Session
-    def _looks_like_session(x: Any) -> bool:
-        return hasattr(x, "execute") or (hasattr(x, "add") and hasattr(x, "commit"))
-
-    # 3) Поддержка позиционного Session первым аргументом
-    pos = list(args)
-    db = kwargs.pop("db", None) or kwargs.pop("session", None)
-    if pos and _looks_like_session(pos[0]):
-        db = db or pos.pop(0)
-    # сопоставим позиционные
-    ordered_names = [
-"plan_path", "bom_path", "machines_path", "out_xlsx", "stock_path",
-        "start_date", "overload_pct", "split_child_orders", "align_roots_to_due",
-        "guard_limit_days",  # этот ключ примем, но дальше НЕ прокидываем
-    ]
-    for i, name in enumerate(ordered_names):
-        if i < len(pos) and name not in kwargs:
-            kwargs[name] = pos[i]
-
-    # дефолты
-    plan_path          = kwargs.get("plan_path")          or "plan of sales.xlsx"
-    bom_path           = kwargs.get("bom_path")           or "BOM.xlsx"
-    machines_path      = kwargs.get("machines_path")      or "machines.xlsx"
-    out_xlsx           = kwargs.get("out_xlsx")           or "schedule_out.xlsx"
-    start_date         = kwargs.get("start_date")         or None
-    stock_path        = kwargs.get("stock_path")        or None
-    overload_pct       = float(kwargs.get("overload_pct") or 0.0)
-    split_child_orders = bool(kwargs.get("split_child_orders") or False)
-    align_roots_to_due = bool(kwargs.get("align_roots_to_due") or False)
-    _guard_limit_days  = kwargs.get("guard_limit_days", None)  # игнорируем для run_pipeline
-    mode = kwargs.get("mode", "")
-
-    # ← ПЕРЕЧЕНЬ, КОТОРЫЙ ПОДДЕРЖИВАЕТ run_pipeline
-    safe_kwargs = dict(
-        stock_path=stock_path,
-        start_date=start_date,
-        overload_pct=overload_pct,
-        split_child_orders=split_child_orders,
-        align_roots_to_due=align_roots_to_due,
-    )
-
-    # запуск основного пайплайна
-    out_xlsx_path, sched_df = run_pipeline(
-        plan_path, bom_path, machines_path, out_xlsx,
-        mode=mode,  # ← пробрасываем режим
-        **safe_kwargs
-    )
-
-    # при необходимости сохранить в БД
-    if save_to_plan_id and db is not None:
-        from ..db.models import ScheduleOp, MachineLoadDaily, PlanVersion
-        from .utils import compute_daily_loads
-
-        plan = db.get(PlanVersion, int(save_to_plan_id))
-        if plan is None:
-            raise ValueError(f"PlanVersion id={save_to_plan_id} not found")
-        if sched_df is None or getattr(sched_df, "empty", True):
-            raise RuntimeError("Greedy produced empty schedule, nothing to save.")
-
-        df_ops = sched_df.copy()
-        df_ops["start_ts"] = pd.to_datetime(df_ops["date"])
-        df_ops["end_ts"] = pd.to_datetime(df_ops["date"]) + pd.to_timedelta(1, unit="D")
-        df_ops["duration_sec"] = (
-            pd.to_numeric(df_ops.get("minutes", 0), errors="coerce").fillna(0.0) * 60
-        ).astype(int)
-        df_ops["setup_sec"] = 0
-        df_ops["op_index"] = (
-            pd.to_numeric(df_ops.get("step", 1), errors="coerce").fillna(1).astype(int)
-        )
-        df_ops["batch_id"] = ""
-        df_ops["qty"] = pd.to_numeric(df_ops.get("qty", 0), errors="coerce").fillna(0.0)
-
-        article_name_map = {}
-        try:
-            if bom_path:
-                article_name_map = _L_load_bom_article_name_map(Path(bom_path))
-        except Exception:
-            article_name_map = {}
-
-        bulk_ops = []
-        for r in df_ops.itertuples(index=False):
-            article_name = article_name_map.get(str(getattr(r, "item_id", "") or "")) or None
-            bulk_ops.append(
-                ScheduleOp(
-                    plan_id=plan.id,
-                    order_id=str(r.order_id),
-                    item_id=str(r.item_id),
-                    article_name=article_name,
-                    machine_id=str(r.machine_id),
-                    start_ts=r.start_ts,
-                    end_ts=r.end_ts,
-                    qty=float(getattr(r, "qty", 0) or 0.0),
-                    duration_sec=int(r.duration_sec),
-                    setup_sec=int(getattr(r, "setup_sec", 0) or 0),
-                    op_index=int(getattr(r, "op_index", 0) or 0),
-                    batch_id=str(getattr(r, "batch_id", "") or ""),
-                )
-            )
-        db.bulk_save_objects(bulk_ops)
-        db.commit()
-
-        loads_df = compute_daily_loads(df_ops)
-        bulk_loads = [
-            MachineLoadDaily(
-                plan_id=plan.id,
-                machine_id=row.machine_id,
-                work_date=row.work_date,
-                load_sec=int(row.load_sec),
-                cap_sec=int(row.cap_sec),
-                util=float(row.util),
-            )
-            for row in loads_df.itertuples(index=False)
-        ]
-        db.bulk_save_objects(bulk_loads)
-        db.commit()
-
-        try:
-            plan.origin = plan.origin or "greedy"
-            plan.status = "ready"
-            db.commit()
-        except Exception:
-            db.rollback()
-
-    return out_xlsx_path, sched_df
-# =========================
-# CLI (локальный запуск)
-# =========================
 def _parse_args():
     p = argparse.ArgumentParser("Greedy planner (so-planner)")
     p.add_argument("--plan", default="plan of sales.xlsx", help="Путь к plan of sales.xlsx")
@@ -3154,251 +2792,145 @@ def run_pipeline(
     otherwise -> standard pipeline (as before).
     """
     mode = (mode or "").lower().strip()
-  
+
+    def _parse_start(date_str: str | None) -> dt.date | None:
+        if not date_str:
+            return None
+        try:
+            return pd.to_datetime(date_str).date()
+        except Exception:
+            return None
+
+    # --- Product-View branch ---
     if mode == "product_view":
-        # ожидаем, что нам пробросят db: Session, plan_version_id, stock_snapshot_id, receipts_from
         db: Session | None = kwargs.get("db")
         plan_version_id: int | None = kwargs.get("plan_version_id")
         stock_snapshot_id: int | None = kwargs.get("stock_snapshot_id")
         receipts_from: str = kwargs.get("receipts_from", "plan")
-    
-        if db is None or plan_version_id is None or stock_snapshot_id is None:
-            raise ValueError("product_view requires db, plan_version_id and stock_snapshot_id")
-    
-        # гарантируем таблицы
-        _ensure_netting_tables(db)
-    
-        # загрузим склад и поступления из БД
-        if (receipts_from or "plan").lower().strip() == "excel" and kwargs.get("receipts_excel_path"):
-            existing_orders_df = _load_receipts_excel(kwargs.get("receipts_excel_path"))
-        else:
-            existing_orders_df = _load_receipts_from_db(db, plan_version_id, receipts_from)  # df �? item_id,due_date,qty,workshop
-        stock_df = _load_stock_snapshot(db, stock_snapshot_id)  # df с item_id,workshop,stock_qty
-    
-        # неттинг: уже разворачивает BOM внутри себя и возвращает дельта-заказы
+        receipts_excel_path: str | None = kwargs.get("receipts_excel_path")
+        user: str = kwargs.get("user", "ui")
+
+        if db is not None and plan_version_id is not None and stock_snapshot_id is not None:
+            out_file, sched, _ = run_product_view_from_db(
+                db=db,
+                plan_version_id=plan_version_id,
+                stock_snapshot_id=stock_snapshot_id,
+                receipts_from=receipts_from,
+                receipts_excel_path=receipts_excel_path,
+                bom_path=bom_path,
+                machines_path=machines_path,
+                out_xlsx=out_xlsx,
+                user=user,
+                plan_name=kwargs.get("plan_name"),
+            )
+            return out_file, sched
+
+        plan_df = load_plan_of_sales(Path(plan_path))
+        bom = load_bom(Path(bom_path))
+        machines = load_machines(Path(machines_path))
+
+        stock_df = None
+        if stock_path:
+            try:
+                stock_df = load_stock_any(Path(stock_path))
+                if stock_df is not None and "workshop" not in stock_df.columns:
+                    stock_df["workshop"] = ""
+            except Exception:
+                stock_df = None
+
+        existing = None
+        if out_xlsx and Path(out_xlsx).exists():
+            try:
+                tmp = pd.read_excel(Path(out_xlsx), sheet_name="schedule")
+                keep = [c for c in ["item_id", "due_date", "qty", "workshop"] if c in tmp.columns]
+                existing = tmp[keep].copy() if keep else None
+            except Exception:
+                existing = None
+
         demand_net = product_view_generate_demand(
-            plan_df=plan_df,  # как и раньше: расплавленный план продаж (FG)
+            plan_df=plan_df,
             bom=bom,
             stock_df=stock_df,
-            existing_orders_df=existing_orders_df
+            existing_orders_df=existing,
+            fixed_orders_df=kwargs.get("fixed_orders_df"),
         )
-    
-        # Лог/сводка (как у вас уже делалось для Excel) — считаем сразу для БД
-        netting_log = NETTING_LOG.copy()
-        if "date" in netting_log.columns:
-            netting_log["date"] = pd.to_datetime(netting_log["date"]).dt.date
-    
-        # summary
-        def _safe_int(x): 
-            return int(pd.to_numeric(x, errors="coerce").fillna(0))
-        g = netting_log.copy()
-        g["stock_used_total"]    = g["stock_used_exact"].fillna(0).astype(int) + g["stock_used_generic"].fillna(0).astype(int)
-        g["receipts_used_total"] = g["receipts_used"].fillna(0).astype(int)
-        g["orders_created_total"]= g["order_created"].fillna(0).astype(int)
-        # opening (первая opening по паре для отчёта)
-        openings = (g[g["kind"]=="opening"]
-                    .groupby(["item_id","workshop"], as_index=False)[["opening_exact","opening_generic"]]
-                    .max().rename(columns={"opening_exact":"opening_exact_init","opening_generic":"opening_generic_init"}))
-        netting_summary = (g[g["kind"]=="day"]
-            .groupby(["item_id","workshop"], as_index=False)[["stock_used_total","receipts_used_total","orders_created_total"]]
-            .sum()
-            .merge(openings, on=["item_id","workshop"], how="left")
-            .fillna({"opening_exact_init":0,"opening_generic_init":0})
-        )
-    
-        # (опционально) linkage: если у вас есть функция возврата связей — сюда
-        linkage_df = None  # заполним позже при необходимости
-    
-        # сохраним всё в БД (и получим run_id)
-        run_meta = dict(
-            user=kwargs.get("user","ui"),
-            plan_version_id=plan_version_id,
-            stock_snapshot_id=stock_snapshot_id,
-            bom_version_id=kwargs.get("bom_version_id",""),
-            receipts_source_desc=receipts_from,
-            params={"mode":"product_view"}
-        )
-        netting_run_id = _save_netting_results_to_db(
-            db=db,
-            run_meta=run_meta,
-            demand_net=demand_net,
-            netting_log=netting_log,
-            netting_summary=netting_summary,
-            linkage_df=linkage_df
-        )
-    
-        # готовим demand для посадки на мощности (без повторного expand и без stock_map)
-        demand = build_demand(demand_net)  # уже child/fg как в обычной ветке
-        stock_map = None  # склад уже «съеден» неттингом
+        demand = demand_net.copy()
+        if not demand.empty and "priority" in demand.columns:
+            demand["priority"] = pd.to_datetime(demand["priority"]).dt.to_pydatetime()
 
-
-        # Netting -> delta orders
-        demand_net = product_view_generate_demand(plan, bom, stock_df=stock_df, existing_orders_df=existing_orders)
-        demand = build_demand(demand_net)
-
-        # Start date
-        start = None
-        if start_date:
-            try:
-                start = pd.to_datetime(start_date).date()
-            except Exception:
-                start = None
-
-        # Schedule (stock is already netted)
         sched = greedy_schedule(
-            demand, bom, machines,
-            start_date=start,
+            demand,
+            bom,
+            machines,
+            start_date=_parse_start(start_date),
             overload_pct=overload_pct,
             split_child_orders=split_child_orders,
             align_roots_to_due=align_roots_to_due,
             stock_map=None,
+            expand=False,
         )
-
         export_with_charts._machines_df = machines
         out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
-        # --- Append netting_log (+summary) ---
-        try:
-            cols = [
-                "item_id","workshop","customer","date","kind",
-                "opening_exact","opening_generic",
-                "stock_used_exact","stock_used_generic",
-                "receipts_used","order_created","available_after",
-            ]
-            log_df = NETTING_LOG.copy() if NETTING_LOG is not None else pd.DataFrame(columns=cols)
-            if "date" in log_df.columns:
-                log_df["date"] = pd.to_datetime(log_df["date"]).dt.date
-            with pd.ExcelWriter(Path(out_xlsx), engine="openpyxl", mode="a", if_sheet_exists="replace", date_format="yyyy-mm-dd") as xw:
-                log_df.to_excel(xw, index=False, sheet_name="netting_log")
-                g = log_df.copy()
-                gb = ["item_id","workshop"] + (["customer"] if "customer" in g.columns else [])
-                if not g.empty and "kind" in g.columns:
-                    summary = (
-                        g[g["kind"]=="day"]
-                        .groupby(gb, as_index=False)[["stock_used_exact","stock_used_generic","receipts_used","order_created"]]
-                        .sum()
-                    )
-                    summary["stock_used_total"] = summary["stock_used_exact"] + summary["stock_used_generic"]
-                else:
-                    summary = pd.DataFrame(columns=gb + [
-                        "stock_used_exact","stock_used_generic","receipts_used","order_created","stock_used_total"
-                    ])
-                summary.to_excel(xw, index=False, sheet_name="netting_summary")
-        except Exception as e:
-            print("[NETTING] export failed:", e)
         return out_file, sched
 
-    # -------- Standard pipeline (one-pass; stock is consumed inside greedy_schedule) --------
-    plan = load_plan_of_sales(Path(plan_path))
-    demand = build_demand(plan)
+    # --- Standard pipeline ---
+    db: Session | None = kwargs.get("db")
+    plan_version_id = kwargs.get("plan_version_id")
+    plan_df: pd.DataFrame
+    if db is not None and plan_version_id is not None:
+        try:
+            _ensure_netting_tables(db)
+            rows = db.execute(text("""
+                SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
+                FROM plan_line WHERE plan_version_id=:p
+            """), {"p": plan_version_id}).mappings().all()
+            plan_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
+        except Exception as e:
+            print("[GREEDY WARN] failed to load plan_line:", e)
+            plan_df = load_plan_of_sales(Path(plan_path))
+    else:
+        plan_df = load_plan_of_sales(Path(plan_path))
+
+    demand = build_demand(plan_df)
     bom = load_bom(Path(bom_path))
     machines = load_machines(Path(machines_path))
 
     stock_map = None
     if stock_path:
         try:
-            stock_df = load_stock_any(Path(stock_path))
-            if "workshop" not in stock_df.columns:
-                stock_df["workshop"] = ""
-            stock_df = stock_df.assign(
-                item_id=lambda x: x["item_id"].astype(str),
-                workshop=lambda x: x["workshop"].astype(str),
-            )
-            stock_map = {
-                (str(r.item_id), str(r.workshop)): float(r.stock_qty)
-                for r in stock_df.groupby(["item_id","workshop"], as_index=False)["stock_qty"].sum().itertuples(index=False)
-            }
+            _stock_df = load_stock_any(Path(stock_path))
+            if _stock_df is not None:
+                if "workshop" not in _stock_df.columns:
+                    _stock_df["workshop"] = ""
+                _stock_df = (
+                    _stock_df
+                    .assign(item_id=lambda x: x["item_id"].astype(str),
+                            workshop=lambda x: x["workshop"].astype(str))
+                    .groupby(["item_id", "workshop"], as_index=False)["stock_qty"].sum()
+                )
+                stock_map = {
+                    (str(r.item_id), str(r.workshop)): float(r.stock_qty)
+                    for r in _stock_df.itertuples(index=False)
+                }
         except Exception as e:
             print("[GREEDY WARN] stock load failed:", e)
             stock_map = None
 
-    did_netting = False
-
-    start = None
-    if start_date:
-        try:
-            start = pd.to_datetime(start_date).date()
-        except Exception:
-            start = None
-
-    # If user requests Standard-Up and we already netted by stock, augment demand with parents only
-    if (mode == "standard_up") and did_netting:
-        try:
-            # minimal BOM slice for expansion
-            b2 = bom.copy()
-            if "qty_per_parent" not in b2.columns:
-                b2["qty_per_parent"] = 1.0
-            # seed columns
-            need_cols = ["order_id","item_id","due_date","qty","priority"]
-            opt_cols = [c for c in ["customer","workshop"] if c in demand.columns]
-            seed = demand[[c for c in need_cols if c in demand.columns] + opt_cols].copy()
-            exp = expand_demand_with_hierarchy(seed, b2, split_child_orders=True, include_parents=True)
-            parents_only = exp[exp.get("role","FG").eq("PARENT")]
-            cols = [c for c in ["order_id","item_id","due_date","qty","priority","workshop","customer"] if c in parents_only.columns]
-            if not parents_only.empty:
-                demand = pd.concat([demand, parents_only[cols]], ignore_index=True)
-        except Exception as _e:
-            # keep going without parents
-            pass
-
+    demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=False)
     sched = greedy_schedule(
-        demand, bom, machines,
-        start_date=start,
+        demand,
+        bom,
+        machines,
+        start_date=_parse_start(start_date),
         overload_pct=overload_pct,
         split_child_orders=split_child_orders,
         align_roots_to_due=align_roots_to_due,
         stock_map=stock_map,
         include_parents=(mode == "standard_up"),
-        expand=(not did_netting),
     )
 
     export_with_charts._machines_df = machines
     out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
-
-    # Append netting_log and summary to workbook (standard mode)
-    try:
-        cols = [
-            "item_id","workshop","customer","date","kind",
-            "opening_exact","opening_generic",
-            "stock_used_exact","stock_used_generic",
-            "receipts_used","order_created","available_after",
-        ]
-        net_log = NETTING_LOG.copy() if NETTING_LOG is not None else pd.DataFrame(columns=cols)
-        if "date" in net_log.columns:
-            net_log["date"] = pd.to_datetime(net_log["date"]).dt.date
-        with pd.ExcelWriter(Path(out_xlsx), engine="openpyxl", mode="a", if_sheet_exists="replace", date_format="yyyy-mm-dd") as xw:
-            net_log.to_excel(xw, index=False, sheet_name="netting_log")
-            g = net_log.copy()
-            gb = ["item_id","workshop"] + (["customer"] if "customer" in g.columns else [])
-            if not g.empty and "kind" in g.columns:
-                summary = (
-                    g[g["kind"]=="day"]
-                    .groupby(gb, as_index=False)[
-                        ["stock_used_exact","stock_used_generic","receipts_used"]
-                    ].sum()
-                )
-                summary["stock_used_total"] = summary["stock_used_exact"].fillna(0).astype(int) + summary["stock_used_generic"].fillna(0).astype(int)
-            else:
-                summary = pd.DataFrame(columns=gb + [
-                    "stock_used_exact","stock_used_generic","receipts_used","stock_used_total"
-                ])
-            # Override order_created from residual demand if available in scope
-            try:
-                dn = demand_net.copy() if 'demand_net' in locals() else None
-                if dn is not None and not dn.empty:
-                    if "workshop" not in dn.columns:
-                        dn["workshop"] = ""
-                    gb2 = ["item_id","workshop"] + (["customer"] if "customer" in dn.columns else [])
-                    orders_summary = dn.groupby(gb2, as_index=False)["qty"].sum().rename(columns={"qty":"order_created"})
-                    summary = (
-                        summary.drop(columns=["order_created"], errors="ignore")
-                               .merge(orders_summary, on=gb, how="outer")
-                               .fillna({"stock_used_exact":0, "stock_used_generic":0, "receipts_used":0, "stock_used_total":0, "order_created":0})
-                    )
-            except Exception:
-                pass
-            summary.to_excel(xw, index=False, sheet_name="netting_summary")
-    except Exception as e:
-        print("[NETTING] append failed:", e)
     return out_file, sched
 
 
