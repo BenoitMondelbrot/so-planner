@@ -64,6 +64,7 @@
     table{ border-collapse:collapse; width:100%; font-size:13px; } th,td{ padding:6px 8px; border-bottom:1px solid var(--border-weak); white-space:nowrap; }
     table thead th{ position:sticky; top:0; background:var(--header-bg); z-index:1; }
     table tbody th{ background:var(--surface); text-align:left; position:static; }
+    table#ordersTable th{ text-align:center; }
     .log{ background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px; height:220px; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
     .log .ok{ color:var(--ok); } .log .err{ color:var(--danger-text); } .mini{ color:var(--muted); font-size:12px; }
     /* Theme switcher */
@@ -88,6 +89,7 @@
     .bar{ position:absolute; top: calc(50% - 9px); height:18px; display:flex; align-items:center; padding:0 6px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:10px; color:var(--text); background: linear-gradient(180deg, var(--bar-main-1), var(--bar-main-2)); border:1px solid var(--bar-main-border); border-radius:6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.2), 0 2px 8px rgba(0,0,0,.25); cursor:pointer; }
     .bar .bar-text{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%; pointer-events:none; }
     .bar.child{ background: linear-gradient(180deg, var(--bar-child-1), var(--bar-child-2)); border-color: var(--bar-child-border); }
+    .bar.fixed{ border-color: var(--ok); box-shadow: inset 0 0 0 1px rgba(0,0,0,.2), 0 0 0 2px rgba(52,211,153,.35); }
     .bar.late{ outline:2px solid var(--warn); }
     .group-divider{ height:10px; background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02)); border-bottom:1px solid var(--border-weak); }
     .today-line{ position:absolute; top:var(--headerh); bottom:0; width:2px; background: var(--accent); opacity:.65; z-index:2; display:none; }
@@ -186,6 +188,7 @@
       <button class="tabbtn active" data-tab="files" onclick="window.activateTab && window.activateTab('files', this)">Файлы</button>
       <button class="tabbtn" data-tab="netting" onclick="window.activateTab && window.activateTab('netting', this)">Неттинг</button>
       <button class="tabbtn" data-tab="plans" onclick="window.activateTab && window.activateTab('plans', this)">Планы</button>
+      <button class="tabbtn" data-tab="orders" onclick="window.activateTab && window.activateTab('orders', this)">Заказы</button>
       <button class="tabbtn" data-tab="reports" onclick="window.activateTab && window.activateTab('reports', this)">Отчёты</button>
       <button class="tabbtn" data-tab="transfer" onclick="window.activateTab && window.activateTab('transfer', this)">Дефицит к перемещению</button>
     </div>
@@ -350,50 +353,63 @@
 
     <!-- Plans: list + run greedy + heatmap -->
   <section id="plans" class="page">
-    <div class="row">
-      <div class="col" style="flex:0 0 360px;">
-        <div class="card">
-          <h3>Создать версию плана</h3>
-          <div class="row">
-            <div class="col"><input type="text" id="planName" placeholder="Например: Greedy 2025-11-05"/></div>
-            <div class="col" style="flex:0 0 auto;"><button class="btn primary" id="btnCreate">Создать</button></div>
-          </div>
-        </div>
+    <div class="card">
+      <h3>Создать версию плана</h3>
+      <div class="row">
+        <div class="col"><input type="text" id="planName" placeholder="Например: Greedy 2025-11-05"/></div>
+        <div class="col" style="flex:0 0 auto;"><button class="btn primary" id="btnCreate">Создать</button></div>
+      </div>
+    </div>
 
-        <div class="card">
-          <h3>Сохранённые планы</h3>
-          <div class="plans" id="plansList"></div>
-          <div class="row" style="margin-top:8px; align-items:center;">
-            <button class="btn" id="btnRefreshPlans">Обновить список</button>
-            <div style="flex:1"></div>
-            <span class="mini" id="plansCount"></span>
-          </div>
-          <div class="mini" id="selInfo" style="margin-top:6px;"></div>
+    <div class="card">
+      <h3>Сохранённые планы</h3>
+      <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="col" style="flex:0 0 260px;">
+          <label>Версия плана</label>
+          <select id="plansSelect" style="width:100%; padding:8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
         </div>
-
-        <div class="card">
-          <h3>Greedy для выбранного плана</h3>
-          <div class="row">
-            <button class="btn primary" id="btnRunGreedyPlan">Запустить Greedy</button>
-          </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn" id="btnRefreshPlans">Обновить список</button>
+        </div>
+        <div class="col" style="flex:1 1 auto;">
+          <label>&nbsp;</label>
+          <div class="mini" id="selInfo"></div>
         </div>
       </div>
+    </div>
 
-      <div class="col">
-        <div class="card"><h3>Тепловая карта плана</h3>
-          <div class="row" style="gap:8px; align-items:center; margin-bottom:8px;">
-            <div class="col" style="flex:0 0 200px;">
-              <label>Период</label>
-              <select id="hmMainPeriod" style="width:100%; padding:6px 8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
-                <option value="day" selected>Дни</option>
-                <option value="week">Недели</option>
-                <option value="month">Месяцы</option>
-              </select>
-            </div>
-          </div>
-          <div id="heatmap"></div>
-        </div>
+    <div class="card">
+      <h3>Greedy для выбранного плана</h3>
+      <div class="row">
+        <button class="btn primary" id="btnRunGreedyPlan">Запустить Greedy</button>
       </div>
+    </div>
+  </section>
+
+    <!-- Orders: edit from schedule -->
+  <section id="orders" class="page">
+    <div class="card">
+      <h3>Заказы (расписание)</h3>
+      <div class="row">
+        <div class="col" style="flex:0 0 200px;">
+          <label>Версия плана *</label>
+          <select id="ordersPlanSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+        </div>
+        <div class="col"><label>Артикул (item_id)</label><input id="ordersItem" type="text" /></div>
+        <div class="col"><label>Цех</label><input id="ordersWk" type="text" /></div>
+        <div class="col"><label>Дата начала</label><input id="ordersDf" type="date" /></div>
+        <div class="col"><label>Дата окончания</label><input id="ordersDt" type="date" /></div>
+        <div class="col"><label>Номер заказа</label><input id="ordersOid" type="text" /></div>
+      </div>
+      <div class="row" style="margin-top:8px; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button class="btn" id="btnOrdersLoad">Показать</button>
+        <button class="btn primary" id="btnOrdersSave">Сохранить изменения</button>
+        <div style="flex:1"></div>
+        <span class="mini" id="ordersMeta"></span>
+      </div>
+      <div class="table-wrap" style="margin-top:8px;"><table id="ordersTable"></table></div>
+      <div class="mini" style="margin-top:6px;">После сохранения заказы помечаются как «Зафиксирован» и не пересчитываются при следующих прогонах выбранного плана.</div>
     </div>
   </section>
 
@@ -665,6 +681,12 @@
           if(window.loadHeatmapReport) window.loadHeatmapReport();
         }catch(e){}
       }
+      if(tid==='orders'){
+        try{
+          if(typeof window.populatePlans==='function') window.populatePlans('ordersPlanSel');
+          if(typeof window.loadOrdersTable==='function'){ window.loadOrdersTable(); }
+        }catch(e){}
+      }
       if(tid==='transfer'){
         try{
           if(typeof window.populatePlans==='function') window.populatePlans('tdPlanSel');
@@ -781,70 +803,49 @@ el('btnUpload').addEventListener('click', async (evt)=>{
     el('btnLoadCoverage').addEventListener('click', loadCoverage2);
 
     // Plans
-    const API = { plans:()=>fetch('/plans').then(r=>r.json()), runGreedy:(id)=>fetch(`/plans/${id}/run-greedy`,{method:'POST'}).then(r=>r.json()), heatmap:(id, params)=>{ const qs=params? new URLSearchParams(params).toString():''; const url = `/plans/${id}/heatmap` + (qs?`?${qs}`:''); return fetch(url).then(r=>r.json()); } };
-    function renderPlans(){ const box=el('plansList'); box.innerHTML=''; state.plans.forEach(p=>{ const div=document.createElement('div'); div.className='plan-item'+(p.id===state.selectedId?' active':''); div.onclick=()=>{ state.selectedId=p.id; try{ localStorage.setItem('selectedPlanId', String(p.id)); }catch(e){} renderPlans(); loadHeatmap(); }; const left=document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column'; const name=document.createElement('div'); name.textContent=p.name; const meta=document.createElement('div'); meta.className='mini'; meta.textContent=`#${p.id} · ${p.origin}`; left.appendChild(name); left.appendChild(meta); const badge=document.createElement('div'); badge.className='badge status '+(p.status||'ready'); badge.textContent=p.status; div.appendChild(left); div.appendChild(badge); box.appendChild(div); }); el('plansCount').textContent=`${state.plans.length} шт.`; const sel=state.plans.find(p=>p.id===state.selectedId); el('selInfo').textContent= sel? `#${sel.id} · ${sel.name} · ${sel.origin} · ${sel.status}`: 'Не выбран план'; }
-    async function reloadPlans(){ const data=await API.plans(); state.plans=data; if(!state.selectedId && data.length) state.selectedId=data[0].id; renderPlans(); }
-        async function loadHeatmap(){
+    const API = {
+      plans:()=>fetch('/plans').then(r=>r.json()),
+      runGreedy:(id)=>fetch(`/plans/${id}/run-greedy`,{method:'POST'}).then(r=>r.json()),
+    };
+    function renderPlans(){
+      const sel = el('plansSelect');
+      if(!sel) return;
+      sel.innerHTML='';
+      state.plans.forEach(p=>{
+        const o=document.createElement('option');
+        o.value=String(p.id);
+        o.textContent=`#${p.id} · ${p.name}`;
+        sel.appendChild(o);
+      });
+      if(state.selectedId){
+        sel.value = String(state.selectedId);
+      } else if(state.plans.length){
+        state.selectedId = state.plans[0].id;
+        sel.value = String(state.selectedId);
+      }
+      const meta = el('selInfo');
+      const current = state.plans.find(p=>p.id===state.selectedId);
+      if(meta){
+        meta.textContent = current ? `#${current.id} · ${current.name} · ${current.origin} · ${current.status}` : 'Не выбран план';
+      }
+      sel.onchange = ()=> {
+        const v = sel.value ? parseInt(sel.value,10) : null;
+        state.selectedId = v;
+        try{ localStorage.setItem('selectedPlanId', v? String(v): ''); }catch(e){}
+        renderPlans();
+      };
+    }
+    async function reloadPlans(){
+      const data=await API.plans();
+      const sorted = (data||[]).slice().sort((a,b)=> (b.id||0) - (a.id||0));
+      state.plans=sorted;
+      if(!state.selectedId && sorted.length) state.selectedId=sorted[0].id;
+      renderPlans();
+    }
+    async function loadHeatmap(){
       const container = el('heatmap');
       if(!container) return;
-      const id = state.selectedId;
-      if(!id){
-        container.innerHTML = '<div class="mini" style="padding:12px;">Выберите план, чтобы увидеть тепловую карту</div>';
-        return;
-      }
-      try{
-        const periodSel = el('hmMainPeriod');
-        const period = periodSel ? periodSel.value : 'day';
-        const df = (document.getElementById('hmDf')?.value||'');
-        const dt = (document.getElementById('hmDt')?.value||'');
-        const wkRaw=(document.getElementById('hmWk')?.value||'');
-        const wkSet=new Set(parseList(wkRaw).map(x=>x.toLowerCase()));
-        const res = await API.heatmap(id, { period });
-        const machines = res?.machines || [];
-        const dates = res?.dates || [];
-        const util = res?.util || {};
-        if(!machines.length){
-          container.innerHTML = '<div class="mini" style="padding:12px;">Не выбраны станки</div>';
-          return;
-        }
-        if(!dates.length){
-          container.innerHTML = '<div class="mini" style="padding:12px;">Нет данных</div>';
-          return;
-        }
-        const tbl = document.createElement('table');
-        tbl.className = 'heatmap-table';
-        const thead = document.createElement('thead');
-        const trh = document.createElement('tr');
-        const thMachine = document.createElement('th'); thMachine.textContent='Станок'; trh.appendChild(thMachine);
-        const thShop = document.createElement('th'); thShop.textContent='Цех'; trh.appendChild(thShop);
-        dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); });
-        thead.appendChild(trh); tbl.appendChild(thead);
-        const tbody=document.createElement('tbody');
-        machines.forEach(m=>{
-          const tr=document.createElement('tr');
-          const nameCell=document.createElement('td'); nameCell.className='name-cell'; nameCell.textContent=m.name||m.id; nameCell.title = machineLabel(m); tr.appendChild(nameCell);
-          const shopCell=document.createElement('td'); shopCell.className='shop-cell'; shopCell.textContent=m.workshop||'—'; shopCell.title = m.workshop||'—'; tr.appendChild(shopCell);
-          dates.forEach(d=>{
-            const key = `${m.id}|${d}`;
-            const u = Number(util[key] ?? 0);
-            const td=document.createElement('td');
-            const span=document.createElement('span'); span.className='hm-val'; span.textContent=`${(u*100).toFixed(0)}%`; td.appendChild(span);
-            let color='#000000';
-            if(u>0 && u<1) color = mixColor('#000000','#16a34a', Math.min(1, Math.max(0,u)));
-            if(u>=1 && u<2) color = mixColor('#16a34a','#ef4444', Math.min(1,u-1));
-            if(u>=2) color = '#ef4444';
-            td.style.background = color;
-            tr.appendChild(td);
-          });
-          tbody.appendChild(tr);
-        });
-        tbl.appendChild(tbody);
-        container.innerHTML = '';
-        container.appendChild(tbl);
-      } catch(e){
-        container.innerHTML = '<div class="mini" style="padding:12px;">Ошибка загрузки тепловой карты</div>';
-        console.error(e);
-      }
+      container.innerHTML = '<div class=\"mini\" style=\"padding:12px;\">Нет данных</div>';
     }
 </script>
 
@@ -1213,12 +1214,14 @@ el('btnUpload').addEventListener('click', async (evt)=>{
             if(entry.type==='divider'){ const div=document.createElement('div'); div.className='group-divider'; lBody.appendChild(div.cloneNode(true)); gBody.appendChild(div.cloneNode(true)); continue; }
             const baseId=entry.__base || entry.base_order_id || entry.order_id; const itemId=entry.item_id || entry.order_id; const key=keyOf(baseId, itemId); ensureRelation(relations, baseId, itemId);
             const role=entry.order_id && entry.order_id.includes(':')?'child':'root'; const roleLabel=role==='child'?'Дочерний':'Основной';
+            const status=(entry.status||'').toLowerCase();
+            const statusBadge = status ? `<span class=\"badge\" style=\"background:${status==='fixed'?'var(--ok)':'var(--badge-base)'};color:${status==='fixed'?'#0b1220':'var(--badge-text)'}\">${status==='fixed'?'Фикс':status}</span>` : '';
             const labelRow=document.createElement('div'); labelRow.className='cell-label'; labelRow.style.display='flex'; labelRow.style.alignItems='center'; labelRow.style.gap='8px'; labelRow.style.height=`${rowH}px`;
-            labelRow.innerHTML=`<span class=\"mini\">Тип:</span><span class=\"badge ${role}\">${roleLabel}</span><span>${entry.order_id}</span><span class=\"mini\" style=\"margin-left:auto;\">${entry.start_date} — ${entry.finish_date} (${entry.duration_days} дн.) · срок: ${entry.due_date??'—'}</span>`;
+            labelRow.innerHTML=`<span class=\"mini\">Тип:</span><span class=\"badge ${role}\">${roleLabel}</span>${statusBadge}<span>${entry.order_id}</span><span class=\"mini\" style=\"margin-left:auto;\">${entry.start_date} - ${entry.finish_date} (${entry.duration_days} дн.) · срок: ${entry.due_date??'-'}</span>`;
             lBody.appendChild(labelRow);
             const timeRow=document.createElement('div'); timeRow.className='cell-time'; timeRow.style.position='relative'; timeRow.style.height=`${rowH}px`;
             const startDays=Math.max(0, Math.round((toD(entry.start_date)-minStart)/86400000)); const durationDays=Math.max(1, Math.round((toD(entry.finish_date)-toD(entry.start_date))/86400000)+1);
-            const x0=startDays*dayW; const w=Math.max(6, durationDays*dayW); const bar=document.createElement('div'); bar.className=`bar ${role}`; bar.style.left=`${x0+2}px`; bar.style.width=`${w-4}px`;
+            const x0=startDays*dayW; const w=Math.max(6, durationDays*dayW); const bar=document.createElement('div'); bar.className=`bar ${role}`; if(status==='fixed') bar.classList.add('fixed'); bar.style.left=`${x0+2}px`; bar.style.width=`${w-4}px`;
             if(entry.due_date && toD(entry.finish_date)>toD(entry.due_date)) bar.classList.add('late');
             const itemLabel = entry.article_name || entry.item_name || entry.item_id || '';
             if(itemLabel){
@@ -1945,13 +1948,115 @@ async function loadMachineGantt(){
       }catch(e){ console.warn('Clipboard read failed', e); }
     }
 
+    // Orders tab (schedule-based)
+    const ordersState = { rows: [], dirty: new Map() };
+    const statusLabel = (s)=>{
+      const v=(s||'').toLowerCase();
+      if(v==='fixed') return 'Зафиксирован';
+      if(v==='deleted') return 'Удалён';
+      return 'Не зафиксирован';
+    };
+    function getOrdersPlanId(){
+      const sel = el('ordersPlanSel');
+      if(sel && sel.value) return sel.value;
+      const sid = window.state && window.state.selectedId ? String(window.state.selectedId) : '';
+      if(sel && sid && !sel.value) sel.value = sid;
+      return sid;
+    }
+    function markOrderDirty(oid, updates){
+      const key=String(oid);
+      const cur = ordersState.dirty.get(key) || {order_id: key};
+      Object.assign(cur, updates||{});
+      ordersState.dirty.set(key, cur);
+    }
+    function renderOrdersTable(){
+      const tbl = el('ordersTable'); if(!tbl) return;
+      const rows = Array.isArray(ordersState.rows)? ordersState.rows : [];
+      tbl.innerHTML='';
+      if(!rows.length){
+        tbl.innerHTML = '<thead><tr><th>Нет данных</th></tr></thead>';
+        return;
+      }
+      const thead = document.createElement('thead'); const trh=document.createElement('tr');
+      ["Заказ","Артикул","Цех","Кол-во","Дата начала","Дата окончания","Статус","Действие"].forEach(h=>{ const th=document.createElement('th'); th.textContent=h; th.style.textAlign='center'; trh.appendChild(th); });
+      thead.appendChild(trh); tbl.appendChild(thead);
+      const tbody=document.createElement('tbody');
+      rows.forEach((r)=>{
+        const tr=document.createElement('tr');
+        const cOrder=document.createElement('td'); cOrder.textContent=r.order_id||''; tr.appendChild(cOrder);
+        const cItem=document.createElement('td'); cItem.textContent=r.item_id||''; tr.appendChild(cItem);
+        const cWk=document.createElement('td'); cWk.textContent=r.workshop||''; tr.appendChild(cWk);
+        const cQty=document.createElement('td');
+        const qtyInput=document.createElement('input'); qtyInput.type='number'; qtyInput.step='0.01'; qtyInput.min='0'; qtyInput.value=r.qty??''; qtyInput.style.width='110px';
+        qtyInput.addEventListener('change',(e)=>{ r.qty=e.target.value; markOrderDirty(r.order_id,{qty:e.target.value}); });
+        cQty.appendChild(qtyInput); tr.appendChild(cQty);
+        const cStart=document.createElement('td'); const sInput=document.createElement('input'); sInput.type='date'; sInput.value=r.start_date||''; sInput.addEventListener('change',(e)=>{ r.start_date=e.target.value; markOrderDirty(r.order_id,{start_date:e.target.value}); }); cStart.appendChild(sInput); tr.appendChild(cStart);
+        const cEnd=document.createElement('td'); const eInput=document.createElement('input'); eInput.type='date'; eInput.value=r.end_date||''; eInput.addEventListener('change',(e)=>{ r.end_date=e.target.value; markOrderDirty(r.order_id,{end_date:e.target.value}); }); cEnd.appendChild(eInput); tr.appendChild(cEnd);
+        const cStatus=document.createElement('td'); const badge=document.createElement('span'); badge.className='badge'; const st=(r.status||'').toLowerCase(); badge.textContent=statusLabel(st); badge.style.background = st==='fixed' ? 'var(--ok)' : (st==='deleted' ? 'var(--danger-bg)' : 'var(--badge-base)'); badge.style.color = st==='deleted' ? 'var(--danger-text)' : (st==='fixed' ? '#0b1220' : 'var(--badge-text)'); cStatus.appendChild(badge); tr.appendChild(cStatus);
+        const cAct=document.createElement('td'); const delBtn=document.createElement('button'); delBtn.className='btn danger'; delBtn.textContent='Удалить'; delBtn.addEventListener('click', (e)=>{ e.preventDefault(); deleteOrderFromPlan(r.order_id, e.currentTarget); }); cAct.appendChild(delBtn); tr.appendChild(cAct);
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+    }
+    async function loadOrdersTable(btn){
+      const planId = getOrdersPlanId();
+      if(!planId){ toast('Укажите версию плана', false); return; }
+      const params = new URLSearchParams();
+      const it=(el('ordersItem')?.value||'').trim(); const wk=(el('ordersWk')?.value||'').trim(); const df=el('ordersDf')?.value||''; const dt=el('ordersDt')?.value||''; const oid=(el('ordersOid')?.value||'').trim();
+      if(it) params.set('item_id', it); if(wk) params.set('workshop', wk); if(df) params.set('date_from', df); if(dt) params.set('date_to', dt); if(oid) params.set('order_id', oid);
+      const wl = window.withLoading || (async (_b, fn)=>fn());
+      await wl(btn||null, async ()=>{
+        const res = await fetch(`/plans/${planId}/orders?${params.toString()}`).then(r=>r.json());
+        ordersState.rows = res.orders || [];
+        ordersState.dirty = new Map();
+        renderOrdersTable();
+        const metaEl = el('ordersMeta'); if(metaEl) metaEl.textContent = `${res.count ?? ordersState.rows.length} строк`;
+      }, 'Загружаю:');
+    }
+    async function saveOrdersChanges(btn){
+      const planId = getOrdersPlanId();
+      if(!planId){ toast('Укажите версию плана', false); return; }
+      const changes = Array.from(ordersState.dirty.values());
+      if(!changes.length){ toast('Нет изменений для сохранения', false); return; }
+      const payload = changes.map(c=>{
+        const qtyVal = (c.qty===undefined || c.qty===null || c.qty==='') ? null : Number(c.qty);
+        return { order_id:c.order_id, start_date:c.start_date||null, end_date:c.end_date||null, qty: qtyVal };
+      });
+      const wl = window.withLoading || (async (_b, fn)=>fn());
+      await wl(btn||null, async ()=>{
+        const res = await fetch(`/plans/${planId}/orders`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({orders: payload})}).then(r=>r.json());
+        const upd = res.updated ?? payload.length;
+        toast(`Сохранено: ${upd}`, true);
+        await loadOrdersTable();
+      }, 'Сохраняю:');
+    }
+    async function deleteOrderFromPlan(orderId, btn){
+      const planId = getOrdersPlanId();
+      if(!planId){ toast('Укажите версию плана', false); return; }
+      if(!orderId) return;
+      if(!confirm(`Удалить заказ ${orderId}?`)) return;
+      const wl = window.withLoading || (async (_b, fn)=>fn());
+      await wl(btn||null, async ()=>{
+        await fetch(`/plans/${planId}/orders/${encodeURIComponent(orderId)}`, {method:'DELETE'}).then(r=>r.json());
+        toast('Удалено', true);
+        await loadOrdersTable();
+      }, 'Удаляю:');
+    }
+    window.loadOrdersTable = loadOrdersTable;
+
 
   document.addEventListener('DOMContentLoaded', async ()=>{
     await populatePlans('hmPlanSel');
     await populatePlans('mgPlanSel');
+    await populatePlans('ordersPlanSel');
     await populatePlans('orderPlanSel');
     await populatePlans('tdPlanSel');
     ensurePlanOptionsFromRep('orderPlanSel');
+    const ordersPlanSel = document.getElementById('ordersPlanSel');
+    if(ordersPlanSel && window.state?.selectedId){ ordersPlanSel.value = String(window.state.selectedId); }
+    if(ordersPlanSel){ ordersPlanSel.addEventListener('change', ()=>{ ordersState.dirty = new Map(); ordersState.rows = []; renderOrdersTable(); }); }
+    const btnOL=document.getElementById('btnOrdersLoad'); if(btnOL) btnOL.addEventListener('click', (e)=>loadOrdersTable(e.currentTarget));
+    const btnOS=document.getElementById('btnOrdersSave'); if(btnOS) btnOS.addEventListener('click', (e)=>saveOrdersChanges(e.currentTarget));
     // Ensure machine lists are populated based on selected plan
     const HPS=document.getElementById('hmPlanSel');
     if(HPS){ HPS.addEventListener('change', ()=>{ populateMachinesFromPlan('hmPlanSel','hmMachinesSel'); populateWorkshopsFromPlan('hmPlanSel','hmWkList'); }); }
@@ -2019,6 +2124,3 @@ async function loadMachineGantt(){
     }
   })();
 </script>
-
-
-

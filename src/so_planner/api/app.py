@@ -1084,14 +1084,17 @@ def report_orders_timeline(plan_id: int, workshops: Optional[List[str]] = Query(
         g["duration_days"] = (g["finish_date"].dt.normalize() - g["start_date"].dt.normalize()).dt.days + 1
         # due_date from plan_order_info (if present)
         due_map = {}
+        status_map = {}
         try:
             with SessionLocal() as s:
-                due_rows = s.execute(text("SELECT order_id,due_date FROM plan_order_info WHERE plan_id=:pid"), {"pid": plan_id}).mappings().all()
+                due_rows = s.execute(text("SELECT order_id,due_date,status FROM plan_order_info WHERE plan_id=:pid"), {"pid": plan_id}).mappings().all()
                 for r in due_rows:
                     if r["order_id"]:
                         due_map[str(r["order_id"])]= str(r["due_date"]) if r["due_date"] is not None else None
+                        status_map[str(r["order_id"])] = (r.get("status") or "").lower()
         except Exception:
             due_map = {}
+            status_map = {}
 
         out = []
         for _, rr in g.iterrows():
@@ -1116,6 +1119,7 @@ def report_orders_timeline(plan_id: int, workshops: Optional[List[str]] = Query(
                 "duration_days": int(rr["duration_days"]),
                 "due_date": due,
                 "finish_lag": lag,
+                "status": status_map.get(oid),
             })
         return {"status": "ok", "count": len(out), "orders": out}
     except Exception as e:
