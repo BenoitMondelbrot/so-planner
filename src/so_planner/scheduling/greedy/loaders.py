@@ -182,12 +182,22 @@ def load_bom(path: Path) -> pd.DataFrame:
             out["qty_per_parent"] = pd.to_numeric(df[qcol], errors="coerce").fillna(1.0).astype(float)
         else:
             out["qty_per_parent"] = 1.0
+        lag_col = None
+        for cand in ("lag time", "lag_time", "lag", "lagdays", "lag day", "lag_days"):
+            if has(cand):
+                lag_col = col(cand)
+                break
+        if lag_col is not None:
+            out["lag_days"] = pd.to_numeric(df[lag_col], errors="coerce").fillna(0.0).astype(int)
+        else:
+            out["lag_days"] = 0
         if name_col is not None:
             out["article_name"] = df[name_col].apply(_clean_text)
         out = out.sort_values(["item_id", "step"], kind="stable").reset_index(drop=True)
         ret_cols = ["item_id","step","machine_id","time_per_unit","setup_minutes","root_item_id"]
         if "workshop" in out.columns: ret_cols.append("workshop")
         if "qty_per_parent" in out.columns: ret_cols.append("qty_per_parent")
+        if "lag_days" in out.columns: ret_cols.append("lag_days")
         if "article_name" in out.columns: ret_cols.append("article_name")
         return out[ret_cols]
 
@@ -253,11 +263,21 @@ def load_bom(path: Path) -> pd.DataFrame:
         df["qty_per_parent"] = pd.to_numeric(df[key], errors="coerce").fillna(1.0).astype(float)
     else:
         df["qty_per_parent"] = 1.0
+    lag_key = None
+    for cand in ("lag time", "lag_time", "lag", "lagdays", "lag day", "lag_days"):
+        if _norm_col(cand) in norm:
+            lag_key = norm[_norm_col(cand)]
+            break
+    if lag_key is not None:
+        df["lag_days"] = pd.to_numeric(df[lag_key], errors="coerce").fillna(0.0).astype(int)
+    else:
+        df["lag_days"] = 0
 
     df = df.sort_values(["item_id", "step"], kind="stable").reset_index(drop=True)
     ret_cols = ["item_id","step","machine_id","time_per_unit","setup_minutes","root_item_id"]
     if "workshop" in df.columns: ret_cols.append("workshop")
     if "qty_per_parent" in df.columns: ret_cols.append("qty_per_parent")
+    if "lag_days" in df.columns: ret_cols.append("lag_days")
     if "article_name" in df.columns: ret_cols.append("article_name")
     return df[ret_cols]
 

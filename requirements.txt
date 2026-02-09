@@ -1,0 +1,18 @@
+# Core
+fastapi
+matplotlib
+numpy
+openpyxl
+ortools
+pandas
+pydantic
+pydantic-settings
+sqlalchemy
+
+# Runtime helpers
+python-dotenv
+uvicorn
+xlsxwriter
+
+# Optional for PostgreSQL DATABASE_URL (uncomment if needed)
+# psycopg2-binary

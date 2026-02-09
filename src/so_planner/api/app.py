@@ -1,21 +1,21 @@
 # === imports (чистим) ===
-from fastapi import Query, FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 import logging
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 import os, shutil, uuid, traceback
+import time
 import pandas as pd
 import numpy as np
 import datetime as dt
 
-from pydantic import BaseModel, Field
-from typing import Literal, Optional, List
+from pydantic import BaseModel
+from typing import Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, or_
 from collections import defaultdict
-
-from fastapi import Query, FastAPI, UploadFile, File, HTTPException, Depends
+from threading import Lock, Thread
+from copy import deepcopy
 
 
 # ВАЖНО: не тянем Base из .models, а берём только SessionLocal/init_db из пакета db
@@ -64,48 +64,22 @@ LAST_PATHS = {
     "plan": "plan of sales.xlsx",
     "stock": "stock.xlsx",  # optional: stock Excel used by greedy-by-files
     "out": "schedule_out.xlsx",
-    "receipts": None,  # optional: uploaded receipts Excel (ad-hoc)
 }
 
-# --- PATCH START: schemas ---
-
-class PlanVersionCreate(BaseModel):
-    name: str
-    horizon_start: Optional[str] = None
-    horizon_end: Optional[str] = None
-    notes: Optional[str] = None
-
-class PlanLineIn(BaseModel):
-    item_id: str
-    due_date: str
-    qty: int
-    priority: Optional[str] = None
-    customer: Optional[str] = None
-    workshop: Optional[str] = None
-    source_tag: Optional[str] = None
-
-class ReceiptsLineIn(BaseModel):
-    item_id: str
-    due_date: str
-    qty: int
-    workshop: Optional[str] = ""
-    receipt_type: Literal["prod","purchase","transfer"] = "prod"
-    source_ref: Optional[str] = None
+# Transfer-deficit in-memory cache (per-process)
+_TRANSFER_DEFICIT_CACHE_TTL_SEC = 600
+_TRANSFER_DEFICIT_CACHE_MAX = 24
+_TRANSFER_DEFICIT_CACHE: dict[tuple, dict] = {}
+_TRANSFER_DEFICIT_CACHE_LOCK = Lock()
+_TRANSFER_DEFICIT_JOBS_TTL_SEC = 1800
+_TRANSFER_DEFICIT_JOBS_MAX = 32
+_TRANSFER_DEFICIT_JOBS: dict[str, dict] = {}
+_TRANSFER_DEFICIT_JOBS_LOCK = Lock()
 
 class StockLineIn(BaseModel):
     item_id: str
     stock_qty: int
     workshop: Optional[str] = ""
-
-class NettingRunIn(BaseModel):
-    plan_version_id: Optional[int] = None
-    stock_snapshot_id: int
-    # add 'excel' to allow using uploaded receipts sheet
-    receipts_from: Literal["plan","firmed","both","excel"] = "plan"
-    # optional explicit path (if not set, server will use LAST_PATHS['receipts'] when receipts_from='excel')
-    receipts_excel_path: Optional[str] = None
-    bom_version_id: Optional[str] = None
-    params: Optional[dict] = None
 
 class TransferDeficitExport(BaseModel):
     out_path: Optional[str] = None
@@ -115,7 +89,13 @@ class TransferDeficitExport(BaseModel):
     date_to: Optional[str] = None
     period: Optional[str] = "day"
 
-# --- PATCH END ---
+
+class TransferDeficitJobIn(BaseModel):
+    items: Optional[List[str]] = None
+    workshops: Optional[List[str]] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    period: Optional[str] = "day"
 
 # ================== Helpers (JSON-safe) ==================
 def _to_py_scalar(x):
@@ -185,6 +165,91 @@ def _parse_token_list(values: Optional[List[str]]) -> list[str]:
             seen.add(key)
             out.append(t)
     return out
+
+
+def _transfer_cache_get(key: tuple) -> Optional[dict]:
+    now = time.time()
+    with _TRANSFER_DEFICIT_CACHE_LOCK:
+        rec = _TRANSFER_DEFICIT_CACHE.get(key)
+        if not rec:
+            return None
+        ts = float(rec.get("ts") or 0.0)
+        if (now - ts) > _TRANSFER_DEFICIT_CACHE_TTL_SEC:
+            _TRANSFER_DEFICIT_CACHE.pop(key, None)
+            return None
+        rec["last"] = now
+        return deepcopy(rec.get("value"))
+
+
+def _transfer_cache_set(key: tuple, value: dict) -> None:
+    now = time.time()
+    with _TRANSFER_DEFICIT_CACHE_LOCK:
+        _TRANSFER_DEFICIT_CACHE[key] = {"ts": now, "last": now, "value": value}
+        if len(_TRANSFER_DEFICIT_CACHE) > _TRANSFER_DEFICIT_CACHE_MAX:
+            drop_n = len(_TRANSFER_DEFICIT_CACHE) - _TRANSFER_DEFICIT_CACHE_MAX
+            victims = sorted(
+                _TRANSFER_DEFICIT_CACHE.items(),
+                key=lambda kv: float(kv[1].get("last") or kv[1].get("ts") or 0.0),
+            )
+            for old_key, _ in victims[:drop_n]:
+                _TRANSFER_DEFICIT_CACHE.pop(old_key, None)
+
+
+def _transfer_data_version(s: Session, plan_id: int, bom_path: str) -> tuple:
+    op_row = s.execute(
+        text("SELECT COALESCE(MAX(op_id),0) AS max_op_id, COUNT(*) AS cnt FROM schedule_ops WHERE plan_id=:pid"),
+        {"pid": plan_id},
+    ).mappings().first() or {}
+    stock_row = s.execute(
+        text("SELECT COALESCE(MAX(id),0) AS max_snapshot_id, COALESCE(MAX(taken_at),'') AS max_taken_at FROM stock_snapshot")
+    ).mappings().first() or {}
+    bom_mtime = 0
+    try:
+        if bom_path and os.path.exists(bom_path):
+            bom_mtime = int(os.path.getmtime(bom_path))
+    except Exception:
+        bom_mtime = 0
+    return (
+        int(op_row.get("max_op_id") or 0),
+        int(op_row.get("cnt") or 0),
+        int(stock_row.get("max_snapshot_id") or 0),
+        str(stock_row.get("max_taken_at") or ""),
+        bom_mtime,
+    )
+
+
+def _transfer_job_cleanup_locked() -> None:
+    now = time.time()
+    stale_ids = [
+        jid for jid, job in _TRANSFER_DEFICIT_JOBS.items()
+        if (now - float(job.get("updated_ts") or job.get("created_ts") or now)) > _TRANSFER_DEFICIT_JOBS_TTL_SEC
+    ]
+    for jid in stale_ids:
+        _TRANSFER_DEFICIT_JOBS.pop(jid, None)
+    if len(_TRANSFER_DEFICIT_JOBS) <= _TRANSFER_DEFICIT_JOBS_MAX:
+        return
+    victims = sorted(
+        _TRANSFER_DEFICIT_JOBS.items(),
+        key=lambda kv: float(kv[1].get("updated_ts") or kv[1].get("created_ts") or 0.0),
+    )
+    drop_n = len(_TRANSFER_DEFICIT_JOBS) - _TRANSFER_DEFICIT_JOBS_MAX
+    for jid, _ in victims[:drop_n]:
+        _TRANSFER_DEFICIT_JOBS.pop(jid, None)
+
+
+def _transfer_job_payload(job: dict, include_result: bool = False) -> dict:
+    payload = {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "plan_id": job.get("plan_id"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    if job.get("status") == "error":
+        payload["error"] = job.get("error")
+    if include_result and job.get("status") == "done":
+        payload["result"] = job.get("result")
+    return payload
 
 def _ingest_stock_snapshot(stock_path: str, db: Session) -> Optional[int]:
     """Load stock Excel into stock_snapshot/stock_line; return new snapshot id."""
@@ -262,116 +327,6 @@ def index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if not os.path.exists(index_path):
         return HTMLResponse("<h3>UI not found. Build or place index.html to /ui</h3>", status_code=200, media_type="text/html; charset=utf-8")
-    # Small helper to inject new modes and generic mode handling without touching the file on disk
-    def _inject_ui_modes(html: str) -> str:
-        try:
-            # 1) Add Standard-Up option to selector if missing
-            if ('id="selMode"' in html) and ('value="standard_up"' not in html):
-                i0 = html.find('id="selMode"')
-                j = html.find('</select>', i0)
-                if j != -1:
-                    opt = "\n              <option value=\"standard_up\">Стандартный-вверх</option>"
-                    html = html[:j] + opt + html[j:]
-            # 2) Replace hardcoded fetch targets with dynamic mapping
-            mode_expr = "${encodeURIComponent(mode==='standard'?'':(mode==='netting'?'product_view':mode))}"
-            html = html.replace(
-                "fetch('/schedule/greedy?mode=', {method:'POST'})",
-                f"fetch(`/schedule/greedy?mode={mode_expr}`, {{method:'POST'}})"
-            )
-            html = html.replace(
-                "fetch('/schedule/greedy?mode=product_view', {method:'POST'})",
-                f"fetch(`/schedule/greedy?mode={mode_expr}`, {{method:'POST'}})"
-            )
-            # 3) Inject receipts enhancements (option 'excel', upload control, and patched runGreedyJSON)
-            inj = """
-<script>
-document.addEventListener('DOMContentLoaded', function(){
-  try{
-    // Add 'excel' option to receipts selector if missing
-    var sel = document.getElementById('ng-receipts');
-    if(sel){
-      var hasExcel = false; for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value==='excel'){ hasExcel=true; break; } }
-      if(!hasExcel){ var opt=document.createElement('option'); opt.value='excel'; opt.textContent='excel'; sel.appendChild(opt); }
-    }
-  }catch(e){ console.warn('inject receipts option failed', e); }
-  try{
-    // Files tab: add Receipts upload control next to stock
-    var stock = document.getElementById('fStock');
-    if(stock && !document.getElementById('fReceipts')){
-      var wrap = stock.parentElement.parentElement; // row
-      var col = document.createElement('div'); col.className='col';
-      col.innerHTML = '<label>План поступлений (receipts) (.xlsx)</label><input id="fReceipts" type="file" accept=".xlsx,.xls" />';
-      wrap.appendChild(col);
-      var col2 = document.createElement('div'); col2.className='col'; col2.style.flex='0 0 auto';
-      col2.innerHTML = '<label>&nbsp;</label><button class="btn" id="btnUploadReceipts">Upload Receipts</button>';
-      wrap.appendChild(col2);
-      document.getElementById('btnUploadReceipts').addEventListener('click', async function(){
-        try{
-          var f = document.getElementById('fReceipts').files[0];
-          if(!f){ alert('Выберите receipts.xlsx'); return; }
-          var fd = new FormData(); fd.append('receipts', f);
-          var r = await fetch('/upload/receipts', { method:'POST', body: fd });
-          var j = await r.json();
-          if(!r.ok){ alert('Ошибка загрузки: '+(j.error||j.detail?.msg||'unknown')); return; }
-          window.activeReceiptsPath = j.stored_path;
-          if(window.toast) toast('Receipts uploaded', true);
-        }catch(e){ alert('Upload error: '+e); }
-      });
-    }
-  }catch(e){ console.warn('inject receipts upload failed', e); }
-  try{
-    // Patch Run Greedy JSON button to include receipts_excel_path when receipts=='excel'
-    var btn = document.getElementById('btnRunGreedyJSON');
-    if(btn){
-      var nb = btn.cloneNode(true); btn.parentNode.replaceChild(nb, btn);
-      nb.addEventListener('click', async function(){
-        try{
-          const planRaw=document.getElementById('ng-plan').value; const plan=planRaw?parseInt(planRaw,10):null;
-          const stock=parseInt(document.getElementById('ng-stock').value||'0',10);
-          const receipts=(document.getElementById('ng-receipts').value||'plan');
-          if(!stock){ alert('Укажите Stock Snapshot'); return; }
-          const payload={ plan_version_id:plan, stock_snapshot_id:stock, receipts_from:receipts };
-          if(receipts==='excel') payload.receipts_excel_path = (window.activeReceiptsPath||null);
-          const r=await fetch('/schedule/greedy_json',{method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-          const j=await r.json();
-          if(!r.ok){ alert('Ошибка: '+(j.detail?.msg||JSON.stringify(j))); return; }
-          const meta=document.getElementById('ng-meta');
-          if(meta) meta.innerHTML = `rows: <b>${j.rows}</b> · out: <b>${j.out||''}</b> · plan_id: <b>${j.plan_id??''}</b>`;
-          if(j.plan_id) window.state && (window.state.selectedId=j.plan_id);
-        }catch(e){ alert('Run error: '+e); }
-      });
-    }
-  }catch(e){ console.warn('patch runGreedyJSON failed', e); }
-  try{
-    // Add 'Approve selected plan' button on Plans tab
-    var runBtn = document.getElementById('btnRunGreedyPlan');
-    if(runBtn && !document.getElementById('btnApprovePlan')){
-      var row = runBtn.parentElement; var b=document.createElement('button'); b.className='btn'; b.id='btnApprovePlan'; b.textContent='Approve selected'; b.style.marginLeft='8px';
-      row.appendChild(b);
-      b.addEventListener('click', async function(){
-        try{
-          const id = (window.state&&window.state.selectedId)||null; if(!id){ alert('Select plan first'); return; }
-          const r = await fetch(`/plans/${id}/approve`, {method:'POST'}); const j=await r.json();
-          if(!r.ok){ alert('Approve failed'); return; }
-          if(window.toast) toast('Plan approved', true);
-        }catch(e){ alert('Approve error: '+e); }
-      });
-    }
-  }catch(e){ console.warn('inject approve button failed', e); }
-});
-</script>
-"""
-            # append before </body>
-            try:
-                k = html.rfind('</body>')
-                if k != -1 and inj not in html:
-                    html = html[:k] + inj + html[k:]
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return html
-
     # Robust decoding: prefer UTF-8, fallback to Windows-1251, then ignore errors
     try:
         with open(index_path, "r", encoding="utf-8") as f:
@@ -479,23 +434,29 @@ async def upload_and_ingest(machines: UploadFile = File(...),
         tb = traceback.format_exc(limit=3)
         return JSONResponse(status_code=400, content={"status": "error", "error": str(e), "trace": tb})
 
-@app.post("/upload/receipts")
-async def upload_receipts(receipts: UploadFile = File(...)):
-    try:
-        ext = os.path.splitext(receipts.filename or "")[1] or ".xlsx"
-        path = os.path.join("uploads", f"{uuid.uuid4().hex}{ext}")
-        with open(path, "wb") as out:
-            shutil.copyfileobj(receipts.file, out)
-        LAST_PATHS.update({"receipts": path})
-        return JSONResponse(content={"status": "ok", "stored_path": path, "active_paths": LAST_PATHS})
-    except Exception as e:
-        tb = traceback.format_exc(limit=3)
-        return JSONResponse(status_code=400, content={"status": "error", "error": str(e), "trace": tb})
-
-
 def ensure_tables(db: Session):
-    from so_planner.scheduling.greedy_scheduler import _ensure_netting_tables
-    _ensure_netting_tables(db)
+    from so_planner.scheduling.greedy_scheduler import _ensure_support_tables
+    _ensure_support_tables(db)
+
+def _ensure_plan_order_info_cols(db: Session) -> None:
+    """Ensure plan_order_info has columns used by UI/reporting."""
+    ensure_tables(db)
+    try:
+        cols = db.execute(text("PRAGMA table_info(plan_order_info)")).mappings().all()
+        names = {str(getattr(r, "name", r[1])) for r in cols}
+        def _add(col: str, ddl: str) -> None:
+            if col not in names:
+                db.execute(text(f"ALTER TABLE plan_order_info ADD COLUMN {col} {ddl}"))
+        _add("start_date", "DATE")
+        _add("end_date", "DATE")
+        _add("qty", "REAL")
+        _add("workshop", "TEXT")
+        _add("status", "TEXT")
+        _add("fixed_at", "DATETIME")
+        _add("updated_at", "DATETIME")
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 
@@ -509,91 +470,6 @@ def schedule_greedy(mode: str = ""):
       - active_paths,
       - warnings.
     """
-    # Fast path: product_view via DB if requested (auto-pick latest IDs)
-    if (mode or "").lower().strip() == "product_view":
-        try:
-            with SessionLocal() as s:
-                ensure_tables(s)
-                pv = s.execute(text("SELECT id FROM plan_version WHERE status='approved' ORDER BY id DESC LIMIT 1")).scalar()
-                if pv is None:
-                    pv = s.execute(text("SELECT id FROM plan_version ORDER BY id DESC LIMIT 1")).scalar()
-                ss = s.execute(text("SELECT id FROM stock_snapshot ORDER BY id DESC LIMIT 1")).scalar()
-                # Если нет снимка остатков — создаём пустой автоматически, чтобы можно было запустить неттинг «из коробки»
-                auto_created_snapshot = False
-                if ss is None:
-                    ss = s.execute(text("""
-                        INSERT INTO stock_snapshot (name, taken_at, notes)
-                        VALUES ('auto', CURRENT_TIMESTAMP, 'created by /schedule/greedy?mode=product_view')
-                        RETURNING id
-                    """)).scalar()
-                    s.commit()
-                    auto_created_snapshot = True
-                auto_created_plan = False
-                if pv is None:
-                    # Нет ни одной версии плана — создадим пустую и сразу утвердим,
-                    # чтобы первый запуск неттинга мог состояться «из коробки».
-                    name = f"auto {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                    pv = s.execute(text(
-                        """
-                        INSERT INTO plan_version (name, created_at, status, origin)
-                        VALUES (:name, CURRENT_TIMESTAMP, 'approved', 'ui')
-                        RETURNING id
-                        """
-                    ), {"name": name}).scalar()
-                    s.commit()
-                    auto_created_plan = True
-
-                from so_planner.scheduling.greedy_scheduler import run_product_view_from_db
-                out_file, sched, plan_id = run_product_view_from_db(
-                    db=s,
-                    plan_version_id=(None if auto_created_plan else int(pv)),
-                    stock_snapshot_id=int(ss),
-                    receipts_from="plan",
-                    bom_path=LAST_PATHS.get("bom"),
-                    machines_path=LAST_PATHS.get("machines"),
-                    out_xlsx=LAST_PATHS.get("out"),
-                    user="ui",
-                )
-
-                summary, hot = scan_bottlenecks(s)
-
-            rows_cnt = int(len(sched))
-            min_date = str(pd.to_datetime(sched["date"]).min().date()) if rows_cnt else None
-            max_date = str(pd.to_datetime(sched["date"]).max().date()) if rows_cnt else None
-            preview_cols = ["order_id", "item_id", "step", "machine_id", "date", "minutes", "qty", "due_date", "lag_days", "base_order_id"]
-            preview_cols = [c for c in preview_cols if c in sched.columns]
-            preview_df = sched[preview_cols].head(50).copy() if rows_cnt else pd.DataFrame(columns=preview_cols)
-            if "date" in preview_df.columns:
-                preview_df["date"] = pd.to_datetime(preview_df["date"]).dt.date.astype(str)
-            if "due_date" in preview_df.columns:
-                preview_df["due_date"] = pd.to_datetime(preview_df["due_date"]).dt.date.astype(str)
-            preview = df_to_records_py(preview_df) if rows_cnt else []
-
-            try:
-                warnings = list(sched.attrs.get("warnings") or [])
-            except Exception:
-                warnings = []
-
-            payload = {
-                "status": "ok",
-                "out": str(out_file),
-                "rows": rows_cnt,
-                "plan_id": int(plan_id) if plan_id is not None else None,
-                "min_date": min_date,
-                "max_date": max_date,
-                "preview": preview,
-                "bottlenecks": any_to_jsonable(summary),
-                "hot_days": any_to_jsonable(hot),
-                "active_paths": LAST_PATHS,
-                "warnings": warnings,
-            }
-            return JSONResponse(content=payload)
-        except HTTPException:
-            raise
-        except Exception as e:
-            tb = traceback.format_exc(limit=3)
-            raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
-
     try:
         with SessionLocal() as s:
             out_file, sched = run_greedy(
@@ -769,49 +645,6 @@ def export(req: ExportRequest):
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
 
-@app.post("/plans/versions")
-def create_plan_version(payload: PlanVersionCreate, db: Session = Depends(get_db)):
-    ensure_tables(db)
-    q = text("""
-      INSERT INTO plan_version (name, created_at, status, horizon_start, horizon_end, notes, origin)
-      VALUES (:name, CURRENT_TIMESTAMP, 'draft', :hs, :he, :notes, 'ui')
-      RETURNING id
-    """)
-    vid = db.execute(q, {"name": payload.name, "hs": payload.horizon_start, "he": payload.horizon_end, "notes": payload.notes}).scalar_one()
-    db.commit()
-    return {"id": int(vid), "status": "draft"}
-
-@app.post("/plans/versions/{plan_version_id}/lines:bulk")
-def bulk_plan_lines(plan_version_id: int, lines: List[PlanLineIn], db: Session = Depends(get_db)):
-    ensure_tables(db)
-    rows = [l.dict() for l in lines]
-    for r in rows:
-        r["plan_version_id"] = plan_version_id
-    db.execute(text("""
-      INSERT INTO plan_line (plan_version_id,item_id,due_date,qty,priority,customer,workshop,source_tag)
-      VALUES (:plan_version_id,:item_id,:due_date,:qty,:priority,:customer,:workshop,:source_tag)
-    """), rows)
-    db.commit()
-    return {"inserted": len(rows)}
-
-@app.post("/plans/versions/{plan_version_id}/approve")
-def approve_plan_version(plan_version_id: int, db: Session = Depends(get_db)):
-    ensure_tables(db)
-    db.execute(text("UPDATE plan_version SET status='approved' WHERE id=:id"), {"id": plan_version_id})
-    db.commit()
-    return {"id": plan_version_id, "status": "approved"}
-
-@app.post("/receipts/plan/{plan_version_id}:bulk")
-def bulk_receipts_plan(plan_version_id: int, rows: List[ReceiptsLineIn], db: Session = Depends(get_db)):
-    ensure_tables(db)
-    data = [dict(r, plan_version_id=plan_version_id) for r in [x.dict() for x in rows]]
-    db.execute(text("""
-      INSERT INTO receipts_plan (plan_version_id,item_id,due_date,qty,workshop,receipt_type,source_ref)
-      VALUES (:plan_version_id,:item_id,:due_date,:qty,:workshop,:receipt_type,:source_ref)
-    """), data)
-    db.commit()
-    return {"inserted": len(data)}
-
 @app.post("/stock/snapshots")
 def create_stock_snapshot(name: str = "snapshot", notes: Optional[str] = None, db: Session = Depends(get_db)):
     ensure_tables(db)
@@ -834,230 +667,453 @@ def bulk_stock_lines(snapshot_id: int, lines: List[StockLineIn], db: Session = D
     db.commit()
     return {"inserted": len(rows)}
 
-@app.post("/netting/run")
-def netting_run(payload: NettingRunIn, db: Session = Depends(get_db)):
-    """
-    Запускает ветку product_view неттинга, сохраняет результат в БД,
-    возвращает run_id + краткую сводку.
-    """
-    ensure_tables(db)
-
-    # подготавливаем входы как сейчас делает /schedule/greedy, но запускаем только product_view
-    from so_planner.scheduling.greedy_scheduler import run_pipeline
-
-    # Считаем, что plan_df, bom, machines у вас собираются как обычно из загруженных источников.
-    # Если уже есть ваш механизм "loaded", используйте его тут. Ниже — пример через kwargs.
-    out_file, sched = run_pipeline(
-        mode="product_view",
-        plan_version_id=payload.plan_version_id,
-        stock_snapshot_id=payload.stock_snapshot_id,
-        receipts_from=payload.receipts_from,
-        receipts_excel_path=(payload.receipts_excel_path or LAST_PATHS.get("receipts")) if payload.receipts_from == "excel" else None,
-        bom_version_id=payload.bom_version_id,
-        db=db,
-        user="api",
-        **{}  # <- ваш привычный набор: пути к excel или уже загруженные DataFrame'ы
-    )
-
-    # Внутри run_pipeline сохранён netting_run; ради ответа вернём последнее id
-    rid = db.execute(text("SELECT id FROM netting_run ORDER BY id DESC LIMIT 1")).scalar()
-    # Быстрая сводка
-    orders_count = db.execute(text("SELECT COUNT(*) FROM netting_order WHERE netting_run_id=:rid"), {"rid": rid}).scalar()
-    summary_count = db.execute(text("SELECT COUNT(*) FROM netting_summary_row WHERE netting_run_id=:rid"), {"rid": rid}).scalar()
-    log_count = db.execute(text("SELECT COUNT(*) FROM netting_log_row WHERE netting_run_id=:rid"), {"rid": rid}).scalar()
-    return {"run_id": int(rid), "orders": int(orders_count or 0), "summary": int(summary_count or 0), "log": int(log_count or 0)}
-
-
-
-# Lightweight JSON scheduling endpoint (product_view)
-@app.post("/schedule/greedy_json")
-def schedule_greedy_json(payload: NettingRunIn, db: Session = Depends(get_db)):
-    """Runs product_view scheduling and returns rows + out path for UI convenience."""
+# ================== Reports (DB-based) ==================
+@app.get("/reports/plans/{plan_id}/items")
+def report_plan_items(plan_id: int):
     try:
-        ensure_tables(db)
-        from so_planner.scheduling.greedy_scheduler import run_product_view_from_db
-        out_file, sched, plan_id = run_product_view_from_db(
-            db=db,
-            plan_version_id=payload.plan_version_id,
-            stock_snapshot_id=payload.stock_snapshot_id,
-            receipts_from=payload.receipts_from,
-            receipts_excel_path=(payload.receipts_excel_path or LAST_PATHS.get("receipts")) if payload.receipts_from == "excel" else None,
-            bom_path=LAST_PATHS.get("bom"),
-            machines_path=LAST_PATHS.get("machines"),
-            out_xlsx=LAST_PATHS.get("out"),
-            user="api",
-        )
-        rows_cnt = int(len(sched) if sched is not None else 0)
-        return {"status": "ok", "rows": rows_cnt, "out": str(out_file) if out_file is not None else None, "plan_id": plan_id}
+        from ..db.models import ScheduleOp
+        with SessionLocal() as s:
+            rows = (
+                s.query(
+                    ScheduleOp.item_id.label("item_id"),
+                    func.max(ScheduleOp.article_name).label("item_name"),
+                )
+                .filter(ScheduleOp.plan_id == plan_id)
+                .group_by(ScheduleOp.item_id)
+                .all()
+            )
+        items = []
+        for r in rows:
+            if r.item_id is None:
+                continue
+            items.append({"item_id": str(r.item_id), "item_name": str(r.item_name) if r.item_name is not None else None})
+        items = sorted(items, key=lambda x: x["item_id"])
+        return {"status": "ok", "count": len(items), "items": items}
     except Exception as e:
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
 
-
-# ================== Netting (runs, browse) ==================
-@app.get("/netting/runs")
-def list_netting_runs(plan_version_id: Optional[int] = None, db: Session = Depends(get_db)):
-    ensure_tables(db)
-    base = "SELECT id, started_at, finished_at, user, mode, plan_version_id, stock_snapshot_id, status FROM netting_run"
-    if plan_version_id:
-        base += " WHERE plan_version_id = :pv"
-        rows = db.execute(text(base), {"pv": plan_version_id}).mappings().all()
-    else:
-        rows = db.execute(text(base)).mappings().all()
-    # newest first
-    rows = sorted(rows, key=lambda r: r["id"], reverse=True)
-    return [{k: (str(v) if k in ("started_at","finished_at") and v is not None else v) for k, v in dict(r).items()} for r in rows]
-
-
-@app.get("/netting/runs/{rid}")
-def get_netting_run(rid: int, db: Session = Depends(get_db)):
-    ensure_tables(db)
-    head = db.execute(text("SELECT id, started_at, finished_at, user, mode, plan_version_id, stock_snapshot_id, status FROM netting_run WHERE id=:id"), {"id": rid}).mappings().first()
-    if not head:
-        raise HTTPException(status_code=404, detail={"msg": "run not found"})
-    counts = {
-        "orders": int(db.execute(text("SELECT COUNT(*) FROM netting_order WHERE netting_run_id=:id"), {"id": rid}).scalar() or 0),
-        "summary": int(db.execute(text("SELECT COUNT(*) FROM netting_summary_row WHERE netting_run_id=:id"), {"id": rid}).scalar() or 0),
-        "log": int(db.execute(text("SELECT COUNT(*) FROM netting_log_row WHERE netting_run_id=:id"), {"id": rid}).scalar() or 0),
-    }
-    return {"head": dict(head), "counts": counts}
-
-
-@app.get("/netting/runs/{rid}/orders")
-def get_netting_orders(rid: int,
-                       item_id: Optional[str] = None,
-                       workshop: Optional[str] = None,
-                       date_from: Optional[str] = None,
-                       date_to: Optional[str] = None,
-                       db: Session = Depends(get_db)):
-    ensure_tables(db)
-    q = """
-      SELECT order_id, item_id, due_date, qty, priority, workshop
-      FROM netting_order
-      WHERE netting_run_id = :rid
-    """
-    params = {"rid": rid}
-    if item_id:
-        q += " AND item_id = :it"; params["it"] = item_id
-    if workshop:
-        q += " AND COALESCE(workshop,'') = :wk"; params["wk"] = workshop
-    if date_from:
-        q += " AND date(due_date) >= date(:df)"; params["df"] = date_from
-    if date_to:
-        q += " AND date(due_date) <= date(:dt)"; params["dt"] = date_to
-    q += " ORDER BY due_date, item_id"
-    rows = db.execute(text(q), params).mappings().all()
-    # stringify dates
-    out = []
-    for r in rows:
-        rr = dict(r)
-        if rr.get("due_date") is not None:
-            rr["due_date"] = str(rr["due_date"])
-        out.append(rr)
-    return out
-
-
-@app.get("/netting/runs/{rid}/summary")
-def get_netting_summary(rid: int,
-                        item_id: Optional[str] = None,
-                        workshop: Optional[str] = None,
-                        db: Session = Depends(get_db)):
-    ensure_tables(db)
-    q = """
-      SELECT item_id, workshop,
-             stock_used_total, receipts_used_total, orders_created_total,
-             opening_exact_init, opening_generic_init
-      FROM netting_summary_row
-      WHERE netting_run_id = :rid
-    """
-    params = {"rid": rid}
-    if item_id:
-        q += " AND item_id = :it"; params["it"] = item_id
-    if workshop:
-        q += " AND COALESCE(workshop,'') = :wk"; params["wk"] = workshop
-    q += " ORDER BY item_id, workshop"
-    rows = db.execute(text(q), params).mappings().all()
-    return [dict(r) for r in rows]
-
-
-@app.get("/netting/runs/{rid}/log")
-def get_netting_log(rid: int,
-                    item_id: Optional[str] = None,
-                    workshop: Optional[str] = None,
-                    date_from: Optional[str] = None,
-                    date_to: Optional[str] = None,
-                    db: Session = Depends(get_db)):
-    ensure_tables(db)
-    q = """
-      SELECT item_id, workshop, date, kind,
-             opening_exact, opening_generic,
-             stock_used_exact, stock_used_generic,
-             receipts_used, order_created, available_after
-      FROM netting_log_row
-      WHERE netting_run_id = :rid
-    """
-    params = {"rid": rid}
-    if item_id:
-        q += " AND item_id = :it"; params["it"] = item_id
-    if workshop:
-        q += " AND COALESCE(workshop,'') = :wk"; params["wk"] = workshop
-    if date_from:
-        q += " AND date(date) >= date(:df)"; params["df"] = date_from
-    if date_to:
-        q += " AND date(date) <= date(:dt)"; params["dt"] = date_to
-    q += " ORDER BY date, item_id"
-    rows = db.execute(text(q), params).mappings().all()
-    return [{**dict(r), "date": str(r["date"]) if r.get("date") is not None else None} for r in rows]
-
-
-@app.get("/netting/runs/{rid}/coverage")
-def get_coverage(rid: int,
-                 item_id: str,
-                 due_date: str,
-                 workshop: Optional[str] = None,
-                 db: Session = Depends(get_db)):
-    """Return coverage snapshot for given item/due_date from netting_log_row."""
-    ensure_tables(db)
-    base = """
-      SELECT item_id, COALESCE(workshop,'') AS workshop, date, kind,
-             opening_exact, opening_generic,
-             stock_used_exact, stock_used_generic,
-             receipts_used, order_created, available_after
-      FROM netting_log_row
-      WHERE netting_run_id = :rid AND item_id = :it AND date(date) = date(:dd)
-    """
-    params = {"rid": rid, "it": item_id, "dd": due_date}
-    if workshop:
-        base += " AND COALESCE(workshop,'') = :wk"; params["wk"] = workshop
-    base += " ORDER BY date"
-    rows = db.execute(text(base), params).mappings().all()
-    if not rows:
-        return {"opening": {"exact": 0, "generic": 0}, "used": {"stock_exact": 0, "stock_generic": 0, "receipts": 0}, "order_created": 0, "available_after": 0, "receipts_breakdown": []}
-    # take the first matched row (daily snapshot)
-    r = dict(rows[0])
-    return {
-        "opening": {"exact": int(r.get("opening_exact") or 0), "generic": int(r.get("opening_generic") or 0)},
-        "used": {
-            "stock_exact": int(r.get("stock_used_exact") or 0),
-            "stock_generic": int(r.get("stock_used_generic") or 0),
-            "receipts": int(r.get("receipts_used") or 0),
-        },
-        "order_created": int(r.get("order_created") or 0),
-        "available_after": int(r.get("available_after") or 0),
-        "receipts_breakdown": [],
-    }
-
-
-# ================== Reports (DB-based) ==================
-@app.get("/reports/plans/{plan_id}/orders_timeline")
-def report_orders_timeline(plan_id: int, workshops: Optional[List[str]] = Query(default=None)):
+@app.get("/reports/plans/{plan_id}/product_summary")
+def report_product_summary(plan_id: int, item_id: str = Query(..., description="Артикул (item_id)")):
     try:
+        item_id = str(item_id or "").strip()
+        if not item_id:
+            raise HTTPException(status_code=400, detail={"msg": "item_id is required"})
+
+        plan_meta = None
+        try:
+            from ..db.models import PlanVersion
+            with SessionLocal() as s:
+                plan = s.get(PlanVersion, plan_id)
+                if plan:
+                    plan_meta = {
+                        "id": plan.id,
+                        "name": plan.name,
+                        "origin": plan.origin,
+                        "status": plan.status,
+                        "created_at": str(plan.created_at) if plan.created_at is not None else None,
+                        "parent_plan_id": plan.parent_plan_id,
+                    }
+        except Exception:
+            plan_meta = None
+
+        def _to_date(x):
+            if x is None or x == "":
+                return None
+            try:
+                return pd.to_datetime(x).date()
+            except Exception:
+                return None
+
+        def _date_str(x):
+            d = _to_date(x)
+            return str(d) if d is not None else None
+
+        def _end_date_from_ts(ts):
+            if ts is None:
+                return None
+            try:
+                return (ts - dt.timedelta(seconds=1)).date()
+            except Exception:
+                try:
+                    return ts.date()
+                except Exception:
+                    return None
+
+        def _to_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return 0.0
+        def _norm_item(x):
+            s = str(x).strip()
+            if s.endswith(".0"):
+                s = s[:-2]
+            return s
+
+        with SessionLocal() as s:
+            ensure_tables(s)
+            _ensure_plan_order_info_cols(s)
+
+            # order meta (status/due/start/end/qty)
+            meta_rows = s.execute(
+                text(
+                    """
+                    SELECT order_id, status, due_date, start_date, end_date, qty
+                    FROM plan_order_info WHERE plan_id=:pid
+                    """
+                ),
+                {"pid": plan_id},
+            ).mappings().all()
+            meta = {}
+            for r in meta_rows:
+                oid = str(r.get("order_id") or "")
+                if not oid:
+                    continue
+                meta[oid] = {
+                    "status": (r.get("status") or "unfixed").lower(),
+                    "due_date": r.get("due_date"),
+                    "start_date": r.get("start_date"),
+                    "end_date": r.get("end_date"),
+                    "qty": r.get("qty"),
+                }
+
+            ops = s.execute(
+                text(
+                    """
+                    SELECT order_id, item_id, article_name, start_ts, end_ts, qty
+                    FROM schedule_ops
+                    WHERE plan_id = :pid AND item_id = :item
+                    """
+                ),
+                {"pid": plan_id, "item": item_id},
+            ).mappings().all()
+
+            orders = {}
+            item_name = None
+            for r in ops:
+                oid = str(r.get("order_id") or "")
+                if not oid:
+                    continue
+                if item_name is None and r.get("article_name"):
+                    item_name = str(r.get("article_name"))
+                entry = orders.get(oid)
+                start_ts = r.get("start_ts")
+                end_ts = r.get("end_ts")
+                qty = r.get("qty")
+                if entry is None:
+                    orders[oid] = {
+                        "order_id": oid,
+                        "start_ts": start_ts,
+                        "end_ts": end_ts,
+                        "qty": _to_float(qty) if qty is not None else 0.0,
+                    }
+                else:
+                    if start_ts and (entry["start_ts"] is None or start_ts < entry["start_ts"]):
+                        entry["start_ts"] = start_ts
+                    if end_ts and (entry["end_ts"] is None or end_ts > entry["end_ts"]):
+                        entry["end_ts"] = end_ts
+                    if qty is not None:
+                        entry["qty"] = max(_to_float(qty), entry.get("qty") or 0.0)
+
+            order_rows = []
+            for oid, ent in orders.items():
+                m = meta.get(oid, {})
+                status = (m.get("status") or "unfixed").lower()
+                if status == "deleted":
+                    continue
+                qty_val = m.get("qty")
+                if qty_val is None:
+                    qty_val = ent.get("qty")
+                start_date = m.get("start_date") or (ent.get("start_ts").date() if ent.get("start_ts") else None)
+                end_date = m.get("end_date") or _end_date_from_ts(ent.get("end_ts"))
+                order_rows.append(
+                    {
+                        "order_id": oid,
+                        "status": status,
+                        "qty": _to_float(qty_val),
+                        "start_date": _date_str(start_date),
+                        "end_date": _date_str(end_date),
+                        "due_date": _date_str(m.get("due_date")),
+                    }
+                )
+
+            def _summarize(rows, status_name: str):
+                subset = [r for r in rows if (r.get("status") or "unfixed") == status_name]
+                if not subset:
+                    return {"count": 0, "qty": 0.0, "start_date": None, "end_date": None, "due_date_min": None, "due_date_max": None}
+                qty_sum = sum(_to_float(r.get("qty")) for r in subset)
+                start_dates = [d for d in (_to_date(r.get("start_date")) for r in subset) if d]
+                end_dates = [d for d in (_to_date(r.get("end_date")) for r in subset) if d]
+                due_dates = [d for d in (_to_date(r.get("due_date")) for r in subset) if d]
+                return {
+                    "count": len(subset),
+                    "qty": float(qty_sum),
+                    "start_date": str(min(start_dates)) if start_dates else None,
+                    "end_date": str(max(end_dates)) if end_dates else None,
+                    "due_date_min": str(min(due_dates)) if due_dates else None,
+                    "due_date_max": str(max(due_dates)) if due_dates else None,
+                }
+
+            order_rows = sorted(
+                order_rows,
+                key=lambda r: (
+                    0 if (r.get("status") or "") == "fixed" else 1,
+                    r.get("due_date") or "9999-12-31",
+                    r.get("start_date") or "9999-12-31",
+                    r.get("order_id") or "",
+                ),
+            )
+            fixed_sum = _summarize(order_rows, "fixed")
+            unfixed_sum = _summarize(order_rows, "unfixed")
+
+            # Stock snapshot
+            snap_row = s.execute(text("SELECT id, taken_at FROM stock_snapshot ORDER BY taken_at DESC LIMIT 1")).fetchone()
+            stock_snapshot_id = snap_row[0] if snap_row else None
+            stock_snapshot_taken_at = str(snap_row[1]) if snap_row and snap_row[1] is not None else None
+            stock_qty = 0.0
+            stock_by_workshop = []
+            if stock_snapshot_id is not None:
+                stock_qty = _to_float(
+                    s.execute(
+                        text("SELECT COALESCE(SUM(stock_qty),0) FROM stock_line WHERE snapshot_id=:sid AND item_id=:item"),
+                        {"sid": stock_snapshot_id, "item": item_id},
+                    ).scalar_one_or_none()
+                )
+                stock_rows = s.execute(
+                    text(
+                        """
+                        SELECT COALESCE(workshop,'') AS workshop, SUM(stock_qty) AS qty
+                        FROM stock_line
+                        WHERE snapshot_id=:sid AND item_id=:item
+                        GROUP BY COALESCE(workshop,'')
+                        """
+                    ),
+                    {"sid": stock_snapshot_id, "item": item_id},
+                ).mappings().all()
+                stock_by_workshop = [
+                    {"workshop": str(r.get("workshop") or ""), "qty": _to_float(r.get("qty"))} for r in stock_rows
+                ]
+
+            # Demand sources (parents)
+            try:
+                bom_rows = s.execute(text("SELECT item_id, component_id, qty_per FROM bom")).mappings().all()
+            except Exception:
+                bom_rows = []
+            pair_map = {}
+            def _skip_parent(parent: str, child: str) -> bool:
+                if not parent or not child:
+                    return True
+                if parent == child:
+                    return True
+                if parent in {"0", "0.0"}:
+                    return True
+                return False
+            for br in bom_rows:
+                child = _norm_item(br.get("item_id") or "")
+                parent = _norm_item(br.get("component_id") or "")
+                if _skip_parent(parent, child):
+                    continue
+                qty_per = _to_float(br.get("qty_per"))
+                if qty_per <= 0:
+                    qty_per = 1.0
+                key = (parent, child)
+                prev = pair_map.get(key)
+                if prev is None or qty_per > prev:
+                    pair_map[key] = qty_per
+            if not pair_map:
+                try:
+                    def _nc(v: str) -> str:
+                        return str(v).strip().lower().replace(" ", "").replace("_", "")
+                    bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
+                    if bom_path and os.path.exists(bom_path):
+                        bom_df = pd.read_excel(bom_path)
+                        cols = {_nc(c): c for c in bom_df.columns}
+                        def _pick(cands):
+                            for c in cands:
+                                key = _nc(c)
+                                if key in cols:
+                                    return cols[key]
+                            return None
+                        parent_col = _pick(["root article","rootarticle","parent","parent_item","parentitem","item_id","item","article"])
+                        comp_col = _pick(["article","item","item_id","component_id","component","child","rootarticle","root"])
+                        if parent_col == comp_col:
+                            comp_col = _pick(["article","item","component","component_id","child"])
+                        qty_col = _pick(["qty_per_parent","qtyperparent","qty_per","qtyper","qty","quantity","amount"])
+                        if parent_col and comp_col:
+                            tmp = bom_df[[parent_col, comp_col] + ([qty_col] if qty_col else [])].copy()
+                            tmp[parent_col] = tmp[parent_col].astype(str)
+                            tmp[comp_col] = tmp[comp_col].astype(str)
+                            if qty_col:
+                                tmp[qty_col] = pd.to_numeric(tmp[qty_col], errors="coerce").fillna(0.0)
+                            else:
+                                tmp[qty_col] = 1.0
+                            tmp = tmp[(tmp[parent_col] != "") & (tmp[comp_col] != "")]
+                            for _, r in tmp.iterrows():
+                                parent = _norm_item(r[parent_col])
+                                child = _norm_item(r[comp_col])
+                                if _skip_parent(parent, child):
+                                    continue
+                                q = _to_float(r[qty_col])
+                                if q <= 0:
+                                    q = 1.0
+                                key = (parent, child)
+                                prev = pair_map.get(key)
+                                if prev is None or q > prev:
+                                    pair_map[key] = q
+                except Exception:
+                    pass
+            parents_by_child = defaultdict(list)
+            for (parent, child), qty in pair_map.items():
+                parents_by_child[child].append((parent, qty))
+
+            multipliers = defaultdict(float)
+            item_key = _norm_item(item_id)
+            for parent, qty in parents_by_child.get(item_key, []):
+                multipliers[parent] += float(qty or 1.0)
+
+            demand_rows = []
+            if multipliers:
+                parent_ids = list(multipliers.keys())
+                placeholders = ",".join([f":p{i}" for i in range(len(parent_ids))])
+                params = {"pid": plan_id}
+                for i, pid in enumerate(parent_ids):
+                    params[f"p{i}"] = pid
+                parent_ops = s.execute(
+                    text(
+                        f"""
+                        SELECT order_id, item_id, article_name, start_ts, end_ts, qty
+                        FROM schedule_ops
+                        WHERE plan_id = :pid AND item_id IN ({placeholders})
+                        """
+                    ),
+                    params,
+                ).mappings().all()
+                parent_orders = {}
+                for r in parent_ops:
+                    oid = str(r.get("order_id") or "")
+                    pid = str(r.get("item_id") or "")
+                    if not oid or not pid:
+                        continue
+                    key = (oid, pid)
+                    entry = parent_orders.get(key)
+                    start_ts = r.get("start_ts")
+                    end_ts = r.get("end_ts")
+                    qty = r.get("qty")
+                    if entry is None:
+                        parent_orders[key] = {
+                            "order_id": oid,
+                            "item_id": pid,
+                            "article_name": r.get("article_name"),
+                            "start_ts": start_ts,
+                            "end_ts": end_ts,
+                            "qty": _to_float(qty) if qty is not None else 0.0,
+                        }
+                    else:
+                        if start_ts and (entry["start_ts"] is None or start_ts < entry["start_ts"]):
+                            entry["start_ts"] = start_ts
+                        if end_ts and (entry["end_ts"] is None or end_ts > entry["end_ts"]):
+                            entry["end_ts"] = end_ts
+                        if qty is not None:
+                            entry["qty"] = max(_to_float(qty), entry.get("qty") or 0.0)
+                        if entry.get("article_name") in (None, "") and r.get("article_name"):
+                            entry["article_name"] = r.get("article_name")
+
+                for (oid, pid), ent in parent_orders.items():
+                    m = meta.get(oid, {})
+                    status = (m.get("status") or "unfixed").lower()
+                    if status == "deleted":
+                        continue
+                    mult = float(multipliers.get(pid) or 0.0)
+                    if mult <= 0:
+                        continue
+                    parent_qty = m.get("qty")
+                    if parent_qty is None:
+                        parent_qty = ent.get("qty")
+                    parent_qty = _to_float(parent_qty)
+                    demand_rows.append(
+                        {
+                            "parent_item_id": pid,
+                            "parent_name": str(ent.get("article_name")) if ent.get("article_name") is not None else None,
+                            "order_id": oid,
+                            "base_order_id": oid.split(":", 1)[0] if ":" in oid else oid,
+                            "multiplier": mult,
+                            "parent_qty": parent_qty,
+                            "required_qty": float(parent_qty * mult),
+                            "start_date": _date_str(m.get("start_date") or (ent.get("start_ts").date() if ent.get("start_ts") else None)),
+                            "end_date": _date_str(m.get("end_date") or _end_date_from_ts(ent.get("end_ts"))),
+                            "due_date": _date_str(m.get("due_date")),
+                            "status": status,
+                        }
+                    )
+
+            demand_rows = sorted(
+                demand_rows,
+                key=lambda r: (r.get("due_date") or "9999-12-31", r.get("start_date") or "9999-12-31", r.get("order_id") or ""),
+            )
+            total_demand = sum(_to_float(r.get("required_qty")) for r in demand_rows)
+
+            return {
+                "status": "ok",
+                "plan": plan_meta,
+                "item": {"item_id": item_id, "item_name": item_name},
+                "receipts": {
+                    "stock_qty": float(stock_qty),
+                    "stock_snapshot_id": stock_snapshot_id,
+                    "stock_snapshot_taken_at": stock_snapshot_taken_at,
+                    "fixed": fixed_sum,
+                    "unfixed": unfixed_sum,
+                    "orders": order_rows,
+                },
+                "demand": {
+                    "total_qty": float(total_demand),
+                    "rows": demand_rows,
+                },
+            }
+    except Exception as e:
+        tb = traceback.format_exc(limit=3)
+        raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
+
+@app.get("/reports/plans/{plan_id}/orders_timeline")
+def report_orders_timeline(
+    plan_id: int,
+    workshops: Optional[List[str]] = Query(default=None),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    order_id: Optional[str] = None,
+    limit: Optional[int] = Query(default=None, ge=1, le=20000),
+    offset: int = Query(default=0, ge=0),
+    with_total: bool = Query(default=True),
+):
+    try:
+        plan_meta = None
+        try:
+            from ..db.models import PlanVersion
+            with SessionLocal() as s:
+                plan = s.get(PlanVersion, plan_id)
+                if plan:
+                    plan_meta = {
+                        "id": plan.id,
+                        "name": plan.name,
+                        "origin": plan.origin,
+                        "status": plan.status,
+                        "created_at": str(plan.created_at) if plan.created_at is not None else None,
+                        "parent_plan_id": plan.parent_plan_id,
+                    }
+        except Exception:
+            plan_meta = None
         from ..db.models import ScheduleOp, DimMachine
         with SessionLocal() as s:
             tokens, prefixes = _normalize_workshop_tokens_list(workshops)
             q = (
-                s.query(ScheduleOp.order_id, ScheduleOp.item_id, ScheduleOp.article_name, ScheduleOp.start_ts, ScheduleOp.end_ts)
-                 .filter(ScheduleOp.plan_id == plan_id)
+                s.query(
+                    ScheduleOp.order_id.label("order_id"),
+                    func.min(ScheduleOp.start_ts).label("start_ts"),
+                    func.max(ScheduleOp.end_ts).label("end_ts"),
+                    func.min(ScheduleOp.item_id).label("item_id"),
+                    func.max(ScheduleOp.article_name).label("article_name"),
+                )
+                .filter(ScheduleOp.plan_id == plan_id)
             )
             if tokens:
                 conds = [func.lower(func.trim(DimMachine.family)).in_(tokens)]
@@ -1067,27 +1123,64 @@ def report_orders_timeline(plan_id: int, workshops: Optional[List[str]] = Query(
                     q.join(DimMachine, ScheduleOp.machine_id == DimMachine.machine_id, isouter=True)
                      .filter(or_(*conds))
                 )
+            if order_id:
+                q = q.filter(ScheduleOp.order_id.like(f"%{order_id}%"))
+            q = q.group_by(ScheduleOp.order_id)
+            if date_from:
+                try:
+                    d_from = pd.to_datetime(date_from).to_pydatetime()
+                    q = q.having(func.max(ScheduleOp.end_ts) >= d_from)
+                except Exception:
+                    pass
+            if date_to:
+                try:
+                    d_to = pd.to_datetime(date_to).to_pydatetime() + dt.timedelta(days=1) - dt.timedelta(seconds=1)
+                    q = q.having(func.min(ScheduleOp.start_ts) <= d_to)
+                except Exception:
+                    pass
+
+            query_total = int(q.count()) if with_total else None
+            q = q.order_by(func.max(ScheduleOp.end_ts).desc(), ScheduleOp.order_id.asc()).offset(offset)
+            if limit is not None:
+                q = q.limit(int(limit))
             rows = q.all()
         if not rows:
-            return {"status": "ok", "count": 0, "orders": []}
-        import pandas as pd
-        df = pd.DataFrame([
-            {"order_id": r.order_id, "item_id": r.item_id, "article_name": r.article_name, "start_ts": pd.to_datetime(r.start_ts), "end_ts": pd.to_datetime(r.end_ts)}
-            for r in rows
-        ])
-        g = df.groupby("order_id", as_index=False).agg(
-            start_date=("start_ts", "min"),
-            finish_date=("end_ts", "max"),
-            item_id=("item_id", "first"),
-            article_name=("article_name", "first"),
-        )
-        g["duration_days"] = (g["finish_date"].dt.normalize() - g["start_date"].dt.normalize()).dt.days + 1
+            summary = {
+                "total": 0,
+                "with_due_date": 0,
+                "on_time": 0,
+                "late": 0,
+                "no_due_date": 0,
+                "avg_lag": 0.0,
+                "max_lag": 0,
+            }
+            return {
+                "status": "ok",
+                "count": 0,
+                "total": int(query_total or 0) if with_total else None,
+                "limit": limit,
+                "offset": offset,
+                "orders": [],
+                "plan": plan_meta,
+                "summary": summary,
+                "summary_scope": "page",
+            }
         # due_date from plan_order_info (if present)
         due_map = {}
         status_map = {}
         try:
             with SessionLocal() as s:
-                due_rows = s.execute(text("SELECT order_id,due_date,status FROM plan_order_info WHERE plan_id=:pid"), {"pid": plan_id}).mappings().all()
+                order_ids = [str(r.order_id) for r in rows if r.order_id is not None]
+                due_rows = []
+                if order_ids:
+                    ph = ",".join([f":o{i}" for i in range(len(order_ids))])
+                    params = {"pid": plan_id}
+                    for i, oid in enumerate(order_ids):
+                        params[f"o{i}"] = oid
+                    due_rows = s.execute(
+                        text(f"SELECT order_id,due_date,status FROM plan_order_info WHERE plan_id=:pid AND order_id IN ({ph})"),
+                        params,
+                    ).mappings().all()
                 for r in due_rows:
                     if r["order_id"]:
                         due_map[str(r["order_id"])]= str(r["due_date"]) if r["due_date"] is not None else None
@@ -1097,31 +1190,77 @@ def report_orders_timeline(plan_id: int, workshops: Optional[List[str]] = Query(
             status_map = {}
 
         out = []
-        for _, rr in g.iterrows():
-            oid = str(rr["order_id"]) if rr["order_id"] is not None else ""
+        for rr in rows:
+            oid = str(rr.order_id) if rr.order_id is not None else ""
+            if (status_map.get(oid) or "").lower() == "deleted":
+                continue
             due = due_map.get(oid)
+            lag = 0
             try:
-                lag = 0
                 if due:
-                    fd = pd.to_datetime(rr["finish_date"]).normalize()
+                    fd = pd.to_datetime(rr.end_ts).normalize()
                     dd = pd.to_datetime(due).normalize()
                     lag = int((fd - dd).days)
             except Exception:
                 lag = 0
+            start_ts = pd.to_datetime(rr.start_ts)
+            end_ts = pd.to_datetime(rr.end_ts)
+            duration_days = int((end_ts.normalize() - start_ts.normalize()).days + 1)
             out.append({
                 "base_order_id": oid.split(":", 1)[0] if ":" in oid else oid,
                 "order_id": oid,
-                "item_id": str(rr["item_id"]) if rr["item_id"] is not None else "",
-                "article_name": str(rr["article_name"]) if rr["article_name"] is not None else None,
-                "item_name": str(rr["article_name"]) if rr["article_name"] is not None else None,
-                "start_date": str(pd.to_datetime(rr["start_date"]).date()),
-                "finish_date": str(pd.to_datetime(rr["finish_date"]).date()),
-                "duration_days": int(rr["duration_days"]),
+                "item_id": str(rr.item_id) if rr.item_id is not None else "",
+                "article_name": str(rr.article_name) if rr.article_name is not None else None,
+                "item_name": str(rr.article_name) if rr.article_name is not None else None,
+                "start_date": str(start_ts.date()),
+                "finish_date": str(end_ts.date()),
+                "duration_days": duration_days,
                 "due_date": due,
                 "finish_lag": lag,
                 "status": status_map.get(oid),
             })
-        return {"status": "ok", "count": len(out), "orders": out}
+        page_total = len(out)
+        with_due = 0
+        on_time = 0
+        late = 0
+        no_due = 0
+        lag_sum = 0
+        max_lag = None
+        for row in out:
+            due = row.get("due_date")
+            if not due:
+                no_due += 1
+                continue
+            with_due += 1
+            lag = int(row.get("finish_lag") or 0)
+            lag_sum += lag
+            if max_lag is None or lag > max_lag:
+                max_lag = lag
+            if lag <= 0:
+                on_time += 1
+            else:
+                late += 1
+        avg_lag = round(lag_sum / with_due, 2) if with_due else 0.0
+        summary = {
+            "total": page_total,
+            "with_due_date": with_due,
+            "on_time": on_time,
+            "late": late,
+            "no_due_date": no_due,
+            "avg_lag": avg_lag,
+            "max_lag": int(max_lag or 0),
+        }
+        return {
+            "status": "ok",
+            "count": page_total,
+            "total": int(query_total) if with_total and query_total is not None else None,
+            "limit": limit,
+            "offset": offset,
+            "orders": out,
+            "plan": plan_meta,
+            "summary": summary,
+            "summary_scope": "page",
+        }
     except Exception as e:
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
@@ -1239,6 +1378,9 @@ def report_ops_for_orders(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     workshops: Optional[List[str]] = Query(default=None),
+    limit: int = Query(default=5000, ge=1, le=50000),
+    offset: int = Query(default=0, ge=0),
+    with_total: bool = Query(default=False),
 ):
     """
     Возвращает операции для выбранных заказов (order_id) с доп. полями станка.
@@ -1285,6 +1427,8 @@ def report_ops_for_orders(
                 if prefixes:
                     conds.append(or_(*[ScheduleOp.machine_id.like(f"{p}%") for p in prefixes]))
                 q = q.filter(or_(*conds))
+            total = int(q.count()) if with_total else None
+            q = q.order_by(ScheduleOp.start_ts.asc(), ScheduleOp.order_id.asc()).offset(offset).limit(limit)
             rows = q.all()
         out = [
             {
@@ -1304,7 +1448,14 @@ def report_ops_for_orders(
             }
             for r in rows
         ]
-        return {"status": "ok", "ops": out}
+        return {
+            "status": "ok",
+            "count": len(out),
+            "total": int(total) if with_total and total is not None else None,
+            "limit": limit,
+            "offset": offset,
+            "ops": out,
+        }
     except Exception as e:
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
@@ -1341,18 +1492,40 @@ def _compute_transfer_deficit(
 
     try:
         with SessionLocal() as s:
-            ops = s.execute(
-                text(
-                    """
-                    SELECT order_id, item_id, article_name, machine_id, start_ts, end_ts, qty
-                    FROM schedule_ops
-                    WHERE plan_id = :pid
-                    """
-                ),
-                {"pid": plan_id},
-            ).mappings().all()
+            bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
+            cache_key = (
+                int(plan_id),
+                tuple(sorted(item_filter)),
+                tuple(sorted(wk_tokens)),
+                str(date_from or ""),
+                str(date_to or ""),
+                str(period or "day"),
+                _transfer_data_version(s, plan_id, bom_path),
+            )
+            cached = _transfer_cache_get(cache_key)
+            if cached is not None:
+                return cached
+
+            def _cache_return(payload: dict) -> dict:
+                _transfer_cache_set(cache_key, payload)
+                return deepcopy(payload)
+
+            sql = """
+                SELECT order_id, item_id, article_name, machine_id, start_ts, end_ts, qty
+                FROM schedule_ops
+                WHERE plan_id = :pid
+            """
+            sql_params = {"pid": plan_id}
+            if date_from:
+                sql += " AND date(end_ts) >= :date_from"
+                sql_params["date_from"] = str(date_from)
+            if date_to:
+                sql += " AND date(start_ts) <= :date_to"
+                sql_params["date_to"] = str(date_to)
+
+            ops = s.execute(text(sql), sql_params).mappings().all()
             if not ops:
-                return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+                return _cache_return({"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None})
 
             machines = s.execute(text("SELECT machine_id, name, family FROM dim_machine")).mappings().all()
             family_by_id = {str(r["machine_id"]): r.get("family") for r in machines}
@@ -1375,7 +1548,7 @@ def _compute_transfer_deficit(
 
             df = pd.DataFrame(ops)
             if df.empty:
-                return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+                return _cache_return({"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None})
             df["start_ts"] = pd.to_datetime(df["start_ts"])
             df["end_ts"] = pd.to_datetime(df["end_ts"])
             df["base_order_id"] = df["order_id"].astype(str).str.split(":", n=1).str[0]
@@ -1386,7 +1559,7 @@ def _compute_transfer_deficit(
                     df[df["item_id"].astype(str).str.lower().isin(item_filter)]["base_order_id"].unique().tolist()
                 )
                 if not bases:
-                    return {"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None}
+                    return _cache_return({"period": period, "dates": [], "rows": [], "stock_snapshot_id": None, "stock_snapshot_taken_at": None})
                 df = df[df["base_order_id"].isin(bases)]
 
             orders = df.groupby(["order_id", "item_id", "base_order_id"], as_index=False).agg(
@@ -1430,6 +1603,7 @@ def _compute_transfer_deficit(
 
             bom_rows = s.execute(text("SELECT item_id, component_id, qty_per FROM bom")).mappings().all()
             bom_map = {}
+            bom_workshop_by_item: dict[str, str] = {}
             for br in bom_rows:
                 # DB stores item_id as component (child), component_id as parent (see loader synonyms)
                 key = (str(br["component_id"]), str(br["item_id"]))
@@ -1441,7 +1615,20 @@ def _compute_transfer_deficit(
             try:
                 def _nc(s: str) -> str:
                     return str(s).strip().lower().replace(" ", "").replace("_", "")
-                bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
+                def _clean_item(v) -> str:
+                    s = str(v).strip()
+                    if not s or s.lower() in ("nan", "none", "null"):
+                        return ""
+                    if s.endswith(".0"):
+                        s = s[:-2]
+                    return s
+                def _clean_workshop(v) -> str:
+                    s = str(v).strip()
+                    if not s or s.lower() in ("nan", "none", "null"):
+                        return ""
+                    if s.endswith(".0"):
+                        s = s[:-2]
+                    return s
                 if bom_path and os.path.exists(bom_path):
                     bom_df = pd.read_excel(bom_path)
                     cols = { _nc(c): c for c in bom_df.columns }
@@ -1456,15 +1643,27 @@ def _compute_transfer_deficit(
                     if parent_col == comp_col:
                         comp_col = _pick(["article","item","component","component_id","child"])
                     qty_col = _pick(["qty_per_parent","qtyperparent","qty_per","qtyper","qty","quantity","amount"])
+                    wk_col = _pick(["workshop", "shop", "work_center", "workcenter", "workshop_id"])
                     if parent_col and comp_col:
-                        tmp = bom_df[[parent_col, comp_col] + ([qty_col] if qty_col else [])].copy()
-                        tmp[parent_col] = tmp[parent_col].astype(str)
-                        tmp[comp_col] = tmp[comp_col].astype(str)
+                        src_cols = [parent_col, comp_col] + ([qty_col] if qty_col else []) + ([wk_col] if wk_col else [])
+                        tmp = bom_df[src_cols].copy()
+                        tmp[parent_col] = tmp[parent_col].map(_clean_item)
+                        tmp[comp_col] = tmp[comp_col].map(_clean_item)
+                        if wk_col:
+                            tmp[wk_col] = tmp[wk_col].map(_clean_workshop)
                         if qty_col:
                             tmp[qty_col] = pd.to_numeric(tmp[qty_col], errors="coerce").fillna(0.0)
                         else:
                             tmp[qty_col] = 1.0
                         tmp = tmp[(tmp[parent_col]!="") & (tmp[comp_col]!="")]
+                        if wk_col:
+                            wtmp = tmp[(tmp[wk_col] != "")][[comp_col, wk_col]].copy()
+                            if not wtmp.empty:
+                                for iid, grp in wtmp.groupby(comp_col):
+                                    mode_vals = grp[wk_col].mode()
+                                    wk = mode_vals.iat[0] if not mode_vals.empty else grp[wk_col].iat[0]
+                                    if wk and str(iid) not in bom_workshop_by_item:
+                                        bom_workshop_by_item[str(iid)] = str(wk)
                         for _, r in tmp.iterrows():
                             par = r[parent_col]
                             ch = r[comp_col]
@@ -1475,6 +1674,9 @@ def _compute_transfer_deficit(
                                 bom_map[key] = q
             except Exception:
                 pass
+            for iid, wk in bom_workshop_by_item.items():
+                if iid and wk and iid not in item_workshop:
+                    item_workshop[iid] = wk
 
             snap_row = s.execute(text("SELECT id, taken_at FROM stock_snapshot ORDER BY taken_at DESC LIMIT 1")).fetchone()
             stock_snapshot_id = snap_row[0] if snap_row else None
@@ -1490,8 +1692,22 @@ def _compute_transfer_deficit(
                 for sr in stock_rows:
                     stock_map[(str(sr["item_id"]), str(sr["workshop"]))] = float(sr.get("stock_qty") or 0.0)
             stock_total_by_item: dict[str, float] = defaultdict(float)
+            stock_has_named_wk_by_item: dict[str, bool] = defaultdict(bool)
             for (iid, _wk), qty in stock_map.items():
                 stock_total_by_item[str(iid)] += float(qty or 0.0)
+                if str(_wk or "").strip():
+                    stock_has_named_wk_by_item[str(iid)] = True
+
+            def stock_for_workshop(item_id: str, workshop: str | None) -> float:
+                iid = str(item_id)
+                wk = str(workshop or "")
+                key = (iid, wk)
+                if key in stock_map:
+                    return float(stock_map[key] or 0.0)
+                # If item has workshop-specific stock rows, missing workshop means zero on this workshop.
+                if stock_has_named_wk_by_item.get(iid, False):
+                    return 0.0
+                return float(stock_total_by_item.get(iid, 0.0) or 0.0)
 
             try:
                 df_date_from = pd.to_datetime(date_from).date() if date_from else None
@@ -1510,27 +1726,32 @@ def _compute_transfer_deficit(
                 return d
 
             prepared = {}
+            processed_base_child: set[tuple[str, str]] = set()
             for _, r in orders.iterrows():
                 child_item = str(r["item_id"])
                 base_item = str(r["base_item"])
                 base = str(r["base_order_id"])
                 if child_item == base_item:
                     continue
+                pair_key = (base, child_item)
+                if pair_key in processed_base_child:
+                    # One child can be split into multiple order ids (~1, ~2) inside the same base order.
+                    # Parent demand for transfer must be counted once per (base_order_id, child_item).
+                    continue
+                processed_base_child.add(pair_key)
                 parent_base_row = parent_by_base.get(base)
                 parents_info = []
-                seen_parents: set[str] = set()
                 for (p, c), q in bom_map.items():
                     if c != child_item:
                         continue
                     match = orders[(orders["base_order_id"] == base) & (orders["item_id"] == p)]
                     if match.empty:
                         continue
-                    parent_row = match.iloc[0]
                     pid = str(p)
-                    if pid in seen_parents:
-                        continue
-                    seen_parents.add(pid)
-                    parents_info.append((parent_row, float(q or 0.0) or 1.0, pid))
+                    # Parent item can be split into multiple order ids (~1, ~2, ...).
+                    # Each split contributes its own qty/duration window.
+                    for _, parent_row in match.iterrows():
+                        parents_info.append((parent_row, float(q or 0.0) or 1.0, pid))
                 if not parents_info and parent_base_row is not None:
                     pr = parent_base_row
                     if isinstance(pr, pd.Series):
@@ -1567,7 +1788,13 @@ def _compute_transfer_deficit(
                     start_date = pd.to_datetime(parent_start).date()
                     end_date = pd.to_datetime(parent_end).date()
                     dates = pd.date_range(start_date, end_date, freq="D").date
-                    target_wk = str((parent_row or {}).get("workshop") or (parent or {}).get("workshop") or "")
+                    target_wk = str(
+                        (parent_row or {}).get("workshop")
+                        or (parent or {}).get("workshop")
+                        or item_workshop.get(parent_item_id)
+                        or bom_workshop_by_item.get(parent_item_id)
+                        or ""
+                    )
                     key = (child_item, target_wk)
                     bucket = prepared.get(key, defaultdict(float))
                     for d in dates:
@@ -1584,22 +1811,13 @@ def _compute_transfer_deficit(
             for (item_id, target_wk), plan_bucket in prepared.items():
                 if not plan_bucket:
                     continue
-                source_wk = item_workshop.get(item_id)
+                source_wk = item_workshop.get(item_id) or bom_workshop_by_item.get(item_id)
                 # Workshop filter applies only to source workshop
                 if wk_tokens and not _match_workshop(source_wk):
                     continue
                 all_buckets.update(plan_bucket.keys())
-                total_stock = stock_total_by_item.get(item_id, 0.0)
-                source_stock = (
-                    stock_map[(item_id, str(source_wk or ""))]
-                    if (item_id, str(source_wk or "")) in stock_map
-                    else total_stock
-                )
-                target_stock = (
-                    stock_map[(item_id, str(target_wk or ""))]
-                    if (item_id, str(target_wk or "")) in stock_map
-                    else total_stock
-                )
+                source_stock = stock_for_workshop(item_id, source_wk)
+                target_stock = stock_for_workshop(item_id, target_wk)
                 rows_raw.append(
                     {
                         "item_id": item_id,
@@ -1648,13 +1866,13 @@ def _compute_transfer_deficit(
                 rows_raw = [r for r in rows_raw if str(r.get("item_id", "")).lower() in item_filter]
 
             if not rows_raw or not all_buckets:
-                return {
+                return _cache_return({
                     "period": period,
                     "dates": [],
                     "rows": [],
                     "stock_snapshot_id": stock_snapshot_id,
                     "stock_snapshot_taken_at": stock_snapshot_taken_at,
-                }
+                })
 
             sorted_buckets = sorted(all_buckets)
             for row in rows_raw:
@@ -1672,27 +1890,19 @@ def _compute_transfer_deficit(
                     deficit[b] = cum
                 row["deficit"] = deficit
 
-            return {
+            return _cache_return({
                 "period": period,
                 "dates": sorted_buckets,
                 "rows": rows_raw,
                 "stock_snapshot_id": stock_snapshot_id,
                 "stock_snapshot_taken_at": stock_snapshot_taken_at,
-            }
+            })
     except Exception as e:
         tb = traceback.format_exc(limit=3)
         raise HTTPException(status_code=400, detail={"msg": str(e), "trace": tb})
 
-@app.get("/reports/plans/{plan_id}/transfer_deficit")
-def report_transfer_deficit(
-    plan_id: int,
-    items: Optional[List[str]] = Query(default=None, description="Артикулы, можно списком через запятую или перенос"),
-    workshops: Optional[List[str]] = Query(default=None, description="Цеха-числа для фильтрации источника/получателя"),
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    period: str = "day",
-):
-    res = _compute_transfer_deficit(plan_id, items=items, workshops=workshops, date_from=date_from, date_to=date_to, period=period)
+
+def _serialize_transfer_deficit(res: dict) -> dict:
     dates = res.get("dates") or []
     rows_json = []
     for r in res.get("rows", []):
@@ -1718,6 +1928,111 @@ def report_transfer_deficit(
         "stock_snapshot_id": res.get("stock_snapshot_id"),
         "stock_snapshot_taken_at": res.get("stock_snapshot_taken_at"),
     }
+
+
+def _run_transfer_deficit_job(job_id: str) -> None:
+    with _TRANSFER_DEFICIT_JOBS_LOCK:
+        job = _TRANSFER_DEFICIT_JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "running"
+        job["updated_at"] = dt.datetime.utcnow().isoformat()
+        job["updated_ts"] = time.time()
+        plan_id = int(job.get("plan_id"))
+        params = deepcopy(job.get("params") or {})
+    try:
+        res = _compute_transfer_deficit(
+            plan_id,
+            items=params.get("items"),
+            workshops=params.get("workshops"),
+            date_from=params.get("date_from"),
+            date_to=params.get("date_to"),
+            period=params.get("period") or "day",
+        )
+        payload = _serialize_transfer_deficit(res)
+        with _TRANSFER_DEFICIT_JOBS_LOCK:
+            job = _TRANSFER_DEFICIT_JOBS.get(job_id)
+            if job:
+                job["status"] = "done"
+                job["result"] = payload
+                job["updated_at"] = dt.datetime.utcnow().isoformat()
+                job["updated_ts"] = time.time()
+                _transfer_job_cleanup_locked()
+    except Exception as e:
+        err = str(e)
+        if isinstance(e, HTTPException):
+            detail = e.detail
+            if isinstance(detail, dict):
+                err = str(detail.get("msg") or detail)
+            else:
+                err = str(detail)
+        with _TRANSFER_DEFICIT_JOBS_LOCK:
+            job = _TRANSFER_DEFICIT_JOBS.get(job_id)
+            if job:
+                job["status"] = "error"
+                job["error"] = err
+                job["updated_at"] = dt.datetime.utcnow().isoformat()
+                job["updated_ts"] = time.time()
+                _transfer_job_cleanup_locked()
+
+
+@app.post("/reports/plans/{plan_id}/transfer_deficit/jobs")
+def start_transfer_deficit_job(plan_id: int, body: TransferDeficitJobIn):
+    params = {
+        "items": body.items or [],
+        "workshops": body.workshops or [],
+        "date_from": body.date_from,
+        "date_to": body.date_to,
+        "period": body.period or "day",
+    }
+    now_iso = dt.datetime.utcnow().isoformat()
+    now_ts = time.time()
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "plan_id": int(plan_id),
+        "params": params,
+        "result": None,
+        "error": None,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "created_ts": now_ts,
+        "updated_ts": now_ts,
+    }
+    with _TRANSFER_DEFICIT_JOBS_LOCK:
+        _transfer_job_cleanup_locked()
+        _TRANSFER_DEFICIT_JOBS[job_id] = job
+    t = Thread(target=_run_transfer_deficit_job, args=(job_id,), daemon=True)
+    t.start()
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "status_url": f"/reports/transfer_deficit/jobs/{job_id}",
+    }
+
+
+@app.get("/reports/transfer_deficit/jobs/{job_id}")
+def get_transfer_deficit_job(job_id: str, include_result: bool = Query(default=False)):
+    with _TRANSFER_DEFICIT_JOBS_LOCK:
+        _transfer_job_cleanup_locked()
+        job = _TRANSFER_DEFICIT_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail={"msg": "job not found"})
+        payload = _transfer_job_payload(deepcopy(job), include_result=include_result)
+    return payload
+
+@app.get("/reports/plans/{plan_id}/transfer_deficit")
+def report_transfer_deficit(
+    plan_id: int,
+    items: Optional[List[str]] = Query(default=None, description="Артикулы, можно списком через запятую или перенос"),
+    workshops: Optional[List[str]] = Query(default=None, description="Цеха-числа для фильтрации источника/получателя"),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    period: str = "day",
+):
+    res = _compute_transfer_deficit(plan_id, items=items, workshops=workshops, date_from=date_from, date_to=date_to, period=period)
+    return _serialize_transfer_deficit(res)
 
 @app.post("/reports/plans/{plan_id}/transfer_deficit/export")
 def export_transfer_deficit(plan_id: int, body: TransferDeficitExport):

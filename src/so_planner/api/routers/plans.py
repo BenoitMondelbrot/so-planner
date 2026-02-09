@@ -7,7 +7,7 @@ from ...db import get_db
 import os, logging
 from pydantic import BaseModel
 from ...db.models import PlanVersion, ScheduleOp, MachineLoadDaily, DimMachine
-from ...scheduling.greedy_scheduler import run_pipeline, _ensure_netting_tables, load_stock_any
+from ...scheduling.greedy_scheduler import run_pipeline, _ensure_support_tables, load_stock_any
 from ...scheduling.utils import compute_daily_loads
 from ...scheduling.greedy.loaders import load_machines as _load_machines, load_bom_article_name_map
 from pathlib import Path
@@ -29,7 +29,7 @@ def _normalize_workshop_tokens(raw: str | None) -> set[str]:
 
 def _ensure_plan_order_table(db: Session) -> None:
     """Ensure plan_order_info has columns used by UI (status/start/end/qty)."""
-    _ensure_netting_tables(db)
+    _ensure_support_tables(db)
     try:
         cols = db.execute(text("PRAGMA table_info(plan_order_info)")).mappings().all()
         names = {str(getattr(r, "name", r[1])) for r in cols}
@@ -104,7 +104,10 @@ def _aggregate_orders_for_plan(
     date_from: str | None = None,
     date_to: str | None = None,
     order_id: str | None = None,
-) -> List[dict]:
+    limit: int | None = None,
+    offset: int = 0,
+    with_total: bool = True,
+) -> tuple[List[dict], int]:
     meta = _load_order_meta(db, plan_id)
     wk_tokens = _normalize_workshop_tokens(workshop)
     date_from_dt = None
@@ -142,6 +145,16 @@ def _aggregate_orders_for_plan(
     if wk_tokens:
         q = q.filter(func.lower(func.trim(DimMachine.family)).in_(wk_tokens))
 
+    if date_from_dt:
+        q = q.having(func.max(ScheduleOp.end_ts) >= datetime.combine(date_from_dt, datetime.min.time()))
+    if date_to_dt:
+        q = q.having(func.min(ScheduleOp.start_ts) <= datetime.combine(date_to_dt, datetime.max.time()))
+
+    total = int(q.count()) if with_total else 0
+    q = q.order_by(ScheduleOp.order_id).offset(max(0, int(offset or 0)))
+    if limit is not None and int(limit) > 0:
+        q = q.limit(int(limit))
+
     rows = q.all()
     out: List[dict] = []
     for r in rows:
@@ -157,11 +170,6 @@ def _aggregate_orders_for_plan(
                 end_date = (end_ts - timedelta(seconds=1)).date()
             except Exception:
                 end_date = end_ts.date()
-        # intersect filter
-        if date_from_dt and end_date and end_date < date_from_dt:
-            continue
-        if date_to_dt and start_date and start_date > date_to_dt:
-            continue
         m = meta.get(oid, {})
         workshop_val = str(r.workshop) if r.workshop is not None else None
         if not workshop_val and m.get("workshop"):
@@ -181,10 +189,10 @@ def _aggregate_orders_for_plan(
                 "due_date": m.get("due_date") if m else None,
             }
         )
-    return sorted(out, key=lambda x: x["order_id"])
+    return out, total
 
 def _load_lag_map(bom_path: str | None) -> dict:
-    """Load item_id -> lag_days from BOM.xlsx column 'lag time' (in days)."""
+    """Load (parent_item_id, child_item_id) -> lag_days from BOM.xlsx."""
     if not bom_path or not os.path.exists(bom_path):
         return {}
     try:
@@ -193,17 +201,36 @@ def _load_lag_map(bom_path: str | None) -> dict:
         def norm(c: str) -> str:
             return str(c).strip().lower().replace(" ", "").replace("_", "")
         cols = {norm(c): c for c in df.columns}
-        item_col = cols.get("item_id") or cols.get("article") or cols.get("item") or list(df.columns)[0]
+        item_col = cols.get("itemid") or cols.get("article") or cols.get("item") or list(df.columns)[0]
+        parent_col = (
+            cols.get("rootitemid")
+            or cols.get("rootarticle")
+            or cols.get("rootitem")
+            or cols.get("parentitemid")
+            or cols.get("parentitem")
+            or cols.get("parent")
+        )
         lag_col = None
         for name in ("lagtime", "lag_time", "lag", "lagdays"):
             if name in cols:
                 lag_col = cols[name]; break
-        if not lag_col:
+        if not lag_col or not parent_col:
             return {}
-        df = df[[item_col, lag_col]].dropna()
+        df = df[[parent_col, item_col, lag_col]].dropna(subset=[item_col])
+        df[parent_col] = df[parent_col].astype(str).str.strip()
         df[lag_col] = pd.to_numeric(df[lag_col], errors="coerce").fillna(0).astype(int)
         df[item_col] = df[item_col].astype(str).str.strip()
-        return {str(r[item_col]): int(r[lag_col]) for _, r in df.iterrows() if str(r[item_col])}
+        df = df[(df[parent_col] != "") & (df[parent_col] != df[item_col])]
+        if df.empty:
+            return {}
+        out = (
+            df.groupby([parent_col, item_col], as_index=False)[lag_col]
+              .max()
+        )
+        return {
+            (str(r[parent_col]), str(r[item_col])): int(r[lag_col])
+            for _, r in out.iterrows()
+        }
     except Exception:
         return {}
 
@@ -213,6 +240,7 @@ def _adjust_children_dates(df_ops: pd.DataFrame, fixed_meta: Dict[str, dict], la
         return df_ops
     rows = []
     fixed_parents = {}
+    fixed_order_ids: set[str] = set()
     for oid, m in fixed_meta.items():
         if (m.get("status") or "").lower() != "fixed":
             continue
@@ -225,14 +253,38 @@ def _adjust_children_dates(df_ops: pd.DataFrame, fixed_meta: Dict[str, dict], la
         except Exception:
             pe = None
         base = oid.split(":", 1)[0] if ":" in oid else oid
-        fixed_parents[base] = {"start": ps, "end": pe}
+        ent = fixed_parents.get(base)
+        if ent is None:
+            fixed_parents[base] = {"start": ps, "end": pe}
+        else:
+            cur_s = ent.get("start")
+            cur_e = ent.get("end")
+            if ps is not None and (cur_s is None or ps < cur_s):
+                ent["start"] = ps
+            if pe is not None and (cur_e is None or pe > cur_e):
+                ent["end"] = pe
+        if ":" in oid:
+            fixed_order_ids.add(oid)
     if not fixed_parents:
         return df_ops
+    parents_by_child: Dict[str, set[str]] = {}
+    for edge, lag in (lag_map or {}).items():
+        try:
+            p, c = edge
+            if int(lag or 0) < 0:
+                continue
+            parents_by_child.setdefault(str(c), set()).add(str(p))
+        except Exception:
+            continue
     for r in df_ops.itertuples(index=False):
         oid = str(getattr(r, "order_id", "") or "")
         base = oid.split(":", 1)[0] if ":" in oid else oid
         parent = fixed_parents.get(base)
-        if not parent or oid == base or oid == (base + ":" + base.split("-", 1)[0] if ":" in oid else base):
+        if not parent:
+            rows.append(r._asdict())
+            continue
+        item_id = str(getattr(r, "item_id", "") or "")
+        if oid == base or oid in fixed_order_ids:
             rows.append(r._asdict())
             continue
         start = getattr(r, "start_ts")
@@ -243,7 +295,18 @@ def _adjust_children_dates(df_ops: pd.DataFrame, fixed_meta: Dict[str, dict], la
             continue
         lb = parent["start"]
         ub = parent["end"]
-        lag_days = int(lag_map.get(str(getattr(r, "item_id", "") or ""), 0))
+        lag_days = 0
+        parent_item = None
+        candidates = parents_by_child.get(item_id, set())
+        if candidates:
+            fixed_items = {foid.split(":", 1)[1] for foid in fixed_order_ids if foid.startswith(f"{base}:")}
+            by_base = sorted(candidates.intersection(fixed_items))
+            if by_base:
+                parent_item = by_base[0]
+            elif len(candidates) == 1:
+                parent_item = next(iter(candidates))
+        if parent_item is not None:
+            lag_days = int(lag_map.get((str(parent_item), item_id), 0) or 0)
         if lb:
             try:
                 lb = lb - timedelta(days=lag_days)
@@ -275,7 +338,7 @@ def _ingest_stock_snapshot(stock_path: str, db: Session) -> Optional[int]:
     if not stock_path or not os.path.exists(stock_path):
         return None
     try:
-        _ensure_netting_tables(db)
+        _ensure_support_tables(db)
         df = load_stock_any(Path(stock_path))
         if df is None or df.empty:
             return None
@@ -375,6 +438,15 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
     meta = _load_order_meta(db, plan_id)
     fixed_orders = {oid for oid, m in meta.items() if (m.get("status") or "").lower() == "fixed"}
     deleted_orders = {oid for oid, m in meta.items() if (m.get("status") or "").lower() == "deleted"}
+    fixed_order_qty = {}
+    for oid in fixed_orders:
+        try:
+            qty_val = meta.get(oid, {}).get("qty")
+            if qty_val is None:
+                continue
+            fixed_order_qty[str(oid)] = float(qty_val)
+        except Exception:
+            continue
 
     try:
         # 1) Запуск вашего пайплайна. При необходимости пути сделайте настраиваемыми.
@@ -400,6 +472,8 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
             stock_path=stock_path if stock_path else None,
             split_child_orders=True,
             align_roots_to_due=True,
+            reserved_order_ids=deleted_orders,
+            fixed_order_qty=fixed_order_qty,
             mode=mode,
             plan_version_id=plan.id,
             db=db,
@@ -427,6 +501,19 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
         # Сдвиг дат детей относительно зафиксированного родителя с учётом лагов из BOM
         lag_map = _load_lag_map(bom_path)
         df_ops = _adjust_children_dates(df_ops, meta, lag_map)
+        due_map_all = {}
+        if "due_date" in df_ops.columns:
+            try:
+                due_map_all = (
+                    df_ops[["order_id", "due_date"]]
+                    .dropna()
+                    .drop_duplicates(subset=["order_id"])
+                    .set_index("order_id")["due_date"]
+                    .to_dict()
+                )
+                due_map_all = {str(k): v for k, v in due_map_all.items()}
+            except Exception:
+                due_map_all = {}
 
         article_name_map = {}
         try:
@@ -505,6 +592,13 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
             for oid, grp in df_ops.groupby("order_id"):
                 sd = grp["_start_date"].min()
                 ed = grp["_end_date"].max()
+                qty_val = None
+                if "qty" in grp.columns:
+                    try:
+                        qv = pd.to_numeric(grp["qty"], errors="coerce").max()
+                        qty_val = float(qv) if pd.notna(qv) else None
+                    except Exception:
+                        qty_val = None
                 agg_rows.append(
                     {
                         "plan_id": plan.id,
@@ -512,7 +606,7 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
                         "start_date": str(sd) if sd is not None else None,
                         "end_date": str(ed) if ed is not None else None,
                         "workshop": wk_map.get(str(oid)) if wk_map else "",
-                        "qty": float(grp["qty"].iloc[0]) if "qty" in grp.columns else None,
+                        "qty": qty_val,
                         "status": "unfixed",
                         "due_date": due_map.get(str(oid)) if due_map else None,
                     }
@@ -527,13 +621,38 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
                       end_date=excluded.end_date,
                       qty=excluded.qty,
                       workshop=COALESCE(plan_order_info.workshop, excluded.workshop),
-                      due_date=COALESCE(plan_order_info.due_date, excluded.due_date),
+                      due_date=CASE
+                        WHEN plan_order_info.status='fixed' THEN plan_order_info.due_date
+                        ELSE excluded.due_date
+                      END,
                       status=CASE WHEN plan_order_info.status='fixed' THEN plan_order_info.status ELSE excluded.status END,
                       updated_at=CURRENT_TIMESTAMP
                 """),
                 agg_rows,
             )
             db.commit()
+        if fixed_orders and due_map_all:
+            try:
+                upd_rows = []
+                for oid in fixed_orders:
+                    due_val = due_map_all.get(str(oid))
+                    if due_val is None:
+                        continue
+                    upd_rows.append(
+                        {"plan_id": plan.id, "order_id": str(oid), "due_date": str(due_val)}
+                    )
+                if upd_rows:
+                    db.execute(
+                        text("""
+                            UPDATE plan_order_info
+                            SET due_date=:due_date, updated_at=CURRENT_TIMESTAMP
+                            WHERE plan_id=:plan_id AND order_id=:order_id
+                        """),
+                        upd_rows,
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
         # Автофикс корневых заказов (обеспечивают план продаж)
         try:
             agg_map = {r["order_id"]: r for r in agg_rows}
@@ -678,13 +797,34 @@ def list_plan_orders(
     date_from: str | None = Query(default=None, description="Start date inclusive"),
     date_to: str | None = Query(default=None, description="End date inclusive"),
     order_id: str | None = Query(default=None, description="Filter by order_id substring"),
+    limit: int = Query(default=200, ge=1, le=5000, description="Page size"),
+    offset: int = Query(default=0, ge=0, description="Page offset"),
+    with_total: bool = Query(default=True, description="Include total count"),
     db: Session = Depends(get_db),
 ):
     if not db.get(PlanVersion, plan_id):
         raise HTTPException(404, "plan not found")
     _ensure_plan_order_table(db)
-    orders = _aggregate_orders_for_plan(db, plan_id, item_id=item_id, workshop=workshop, date_from=date_from, date_to=date_to, order_id=order_id)
-    return {"status": "ok", "count": len(orders), "orders": orders}
+    orders, total = _aggregate_orders_for_plan(
+        db,
+        plan_id,
+        item_id=item_id,
+        workshop=workshop,
+        date_from=date_from,
+        date_to=date_to,
+        order_id=order_id,
+        limit=limit,
+        offset=offset,
+        with_total=with_total,
+    )
+    return {
+        "status": "ok",
+        "count": len(orders),
+        "total": int(total) if with_total else None,
+        "limit": limit,
+        "offset": offset,
+        "orders": orders,
+    }
 
 @router.patch("/{plan_id}/orders", summary="Update order dates/qty and mark as fixed")
 def update_plan_orders(plan_id: int, payload: OrdersUpdateRequest, db: Session = Depends(get_db)):

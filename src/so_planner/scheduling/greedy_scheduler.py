@@ -1,30 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Greedy-планировщик для so-planner (совместим с API, вашими Excel и старым вызовом с Session).
+Greedy-РїР»Р°РЅРёСЂРѕРІС‰РёРє РґР»СЏ so-planner (СЃРѕРІРјРµСЃС‚РёРј СЃ API, РІР°С€РёРјРё Excel Рё СЃС‚Р°СЂС‹Рј РІС‹Р·РѕРІРѕРј СЃ Session).
 """
 from __future__ import annotations
 
 import numpy as np
 import argparse
 import datetime as dt
+import logging
 from collections import defaultdict
 from pathlib import Path
 
-from typing import Any, Optional, Tuple
-
-from typing import Literal, Iterable
+from typing import Any, Optional, Tuple, Iterable
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-import json
-
-
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import ColorScaleRule
-NETTING_LOG = None
-
 from .greedy.loaders import (
     load_plan_of_sales as _L_load_plan_of_sales,
     load_bom as _L_load_bom,
@@ -45,6 +39,262 @@ load_stock_any = _L_load_stock_any
 # =========================
 def _norm_col(s: str) -> str:
     return str(s).strip().lower().replace(" ", "").replace("_", "")
+
+def _rebalance_unfixed_by_item_schedule(
+    sched: pd.DataFrame,
+    bom: pd.DataFrame,
+    stock_map: dict | None,
+    fixed_order_qty: dict[str, float] | None,
+) -> pd.DataFrame:
+    if sched is None or sched.empty:
+        return sched
+
+    src = sched.copy()
+    df = src.copy()
+    df["order_id"] = df["order_id"].astype(str)
+    df["item_id"] = df["item_id"].astype(str)
+    df["qty"] = pd.to_numeric(df.get("qty", 0), errors="coerce").fillna(0.0).astype(float)
+
+    logger = logging.getLogger("so_planner.rebalance")
+
+    # stock per item (sum across workshops)
+    stock_by_item: dict[str, float] = {}
+    if stock_map:
+        for k, v in stock_map.items():
+            if isinstance(k, tuple) and len(k) == 2:
+                item = str(k[0])
+            else:
+                item = str(k)
+            stock_by_item[item] = stock_by_item.get(item, 0.0) + float(v or 0.0)
+
+    fixed_map: dict[str, float] = {}
+    fixed_by_item: dict[str, float] = {}
+
+    def _item_from_order_id(oid: str) -> str:
+        s = str(oid or "")
+        if ":" in s:
+            tail = s.split(":", 1)[1]
+            return tail.split("~", 1)[0]
+        return s.split("-", 1)[0]
+
+    for k, v in (fixed_order_qty or {}).items():
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if not np.isfinite(fv):
+            continue
+        oid = str(k)
+        val = max(0.0, fv)
+        fixed_map[oid] = val
+        it = _item_from_order_id(oid)
+        if it:
+            fixed_by_item[it] = fixed_by_item.get(it, 0.0) + val
+
+    # Build parent-child multipliers from BOM (max qty_per_parent per pair)
+    pair_map: dict[tuple[str, str], float] = {}
+    if bom is not None and not bom.empty:
+        for r in bom.itertuples(index=False):
+            parent = str(getattr(r, "root_item_id", "") or "")
+            child = str(getattr(r, "item_id", "") or "")
+            if not parent or not child or parent == child:
+                continue
+            mult = float(getattr(r, "qty_per_parent", 1.0) or 1.0)
+            if mult <= 0:
+                mult = 1.0
+            key = (parent, child)
+            prev = pair_map.get(key)
+            if prev is None or mult > prev:
+                pair_map[key] = mult
+
+    if not pair_map:
+        return df
+
+    parents_by_child: dict[str, list[tuple[str, float]]] = {}
+    children: dict[str, set[str]] = {}
+    indeg: dict[str, int] = {}
+    nodes: set[str] = set()
+    for (parent, child), mult in pair_map.items():
+        parents_by_child.setdefault(child, []).append((parent, float(mult)))
+        children.setdefault(parent, set()).add(child)
+        nodes.add(parent)
+        nodes.add(child)
+        indeg[child] = indeg.get(child, 0) + 1
+        indeg.setdefault(parent, indeg.get(parent, 0))
+
+    queue = sorted([n for n in nodes if indeg.get(n, 0) == 0])
+    topo: list[str] = []
+    while queue:
+        n = queue.pop(0)
+        topo.append(n)
+        for ch in sorted(children.get(n, set())):
+            indeg[ch] = indeg.get(ch, 0) - 1
+            if indeg[ch] == 0:
+                queue.append(ch)
+                queue.sort()
+    for n in sorted(nodes):
+        if n not in topo:
+            topo.append(n)
+
+    # order qty per order_id, item_id (max)
+    order_qty_df = df.groupby(["order_id", "item_id"], as_index=False)["qty"].max()
+    order_qty: dict[str, float] = {}
+    order_item: dict[str, str] = {}
+    orders_by_item: dict[str, list[str]] = {}
+    for r in order_qty_df.itertuples(index=False):
+        oid = str(r.order_id)
+        item = str(r.item_id)
+        order_item[oid] = item
+        if oid in fixed_map:
+            qty_val = fixed_map.get(oid, 0.0)
+        else:
+            qty_val = float(getattr(r, "qty", 0.0) or 0.0)
+        if not np.isfinite(qty_val):
+            qty_val = 0.0
+        order_qty[oid] = float(qty_val or 0.0)
+        orders_by_item.setdefault(item, []).append(oid)
+    existing_order_ids: set[str] = set(order_qty.keys())
+
+    def _round_allocate(oids: list[str], target: float) -> dict[str, int]:
+        target_int = int(round(target))
+        if target_int < 0:
+            target_int = 0
+        raw = []
+        for oid in oids:
+            old_qty = float(order_qty.get(oid, 0.0) or 0.0)
+            raw_qty = old_qty
+            base = int(raw_qty // 1)
+            rem = raw_qty - base
+            raw.append({"oid": oid, "base": base, "rem": rem})
+        sum_base = sum(r["base"] for r in raw)
+        delta = target_int - sum_base
+        if raw:
+            if delta > 0:
+                raw.sort(key=lambda r: r["rem"], reverse=True)
+                for i in range(delta):
+                    raw[i % len(raw)]["base"] += 1
+            elif delta < 0:
+                raw.sort(key=lambda r: r["rem"])
+                i = 0
+                steps = -delta
+                while steps > 0 and raw:
+                    r = raw[i % len(raw)]
+                    if r["base"] > 0:
+                        r["base"] -= 1
+                        steps -= 1
+                    i += 1
+        return {r["oid"]: int(r["base"]) for r in raw}
+
+    def _unique_rebalance_oid(seed: str) -> str:
+        i = 1
+        while True:
+            cand = f"{seed}~reb{i}"
+            if cand not in existing_order_ids:
+                existing_order_ids.add(cand)
+                return cand
+            i += 1
+
+    def _spawn_unfixed_order(item_id: str, qty_target: float) -> tuple[str | None, float, pd.DataFrame | None]:
+        if qty_target <= 0:
+            return None, 0.0, None
+        item_oids = list(orders_by_item.get(item_id, []) or [])
+        if not item_oids:
+            return None, 0.0, None
+        # Prefer cloning a fixed branch for this item to preserve route/date shape.
+        template_oid = next((x for x in item_oids if x in fixed_map), item_oids[0])
+        tpl = df[df["order_id"] == template_oid].copy()
+        if tpl.empty:
+            return None, 0.0, None
+        new_qty = int(round(float(qty_target)))
+        if new_qty <= 0:
+            return None, 0.0, None
+        new_oid = _unique_rebalance_oid(template_oid)
+        tpl["order_id"] = new_oid
+        tpl["qty"] = float(new_qty)
+        return new_oid, float(new_qty), tpl
+
+    # scale unfixed orders per item to match demand
+    for item in topo:
+        if item not in parents_by_child:
+            continue
+        demand = 0.0
+        for parent, mult in parents_by_child.get(item, []):
+            for oid in orders_by_item.get(parent, []):
+                parent_qty = order_qty.get(oid, 0.0)
+                demand += float(parent_qty or 0.0) * float(mult or 1.0)
+
+        # Keep fixed demand by item even if exact fixed order_id is absent in current expanded schedule
+        # (e.g. branch renumbering with ~ suffix on repeat run).
+        fixed_sum = float(fixed_by_item.get(str(item), 0.0) or 0.0)
+        unfixed_oids: list[str] = []
+        unfixed_sum = 0.0
+        for oid in orders_by_item.get(item, []):
+            qty = float(order_qty.get(oid, 0.0) or 0.0)
+            if oid in fixed_map:
+                continue
+            else:
+                unfixed_sum += qty
+                unfixed_oids.append(oid)
+
+        stock_qty = float(stock_by_item.get(item, 0.0) or 0.0)
+        target_unfixed = demand - stock_qty - fixed_sum
+        if not np.isfinite(target_unfixed):
+            target_unfixed = 0.0
+        if target_unfixed < 0:
+            target_unfixed = 0.0
+
+        if not unfixed_oids and target_unfixed > 0:
+            new_oid, new_qty, new_rows = _spawn_unfixed_order(str(item), target_unfixed)
+            if new_oid and new_rows is not None:
+                df = pd.concat([df, new_rows], ignore_index=True)
+                order_item[new_oid] = str(item)
+                order_qty[new_oid] = float(new_qty)
+                orders_by_item.setdefault(str(item), []).append(new_oid)
+                unfixed_oids = [new_oid]
+                unfixed_sum = float(new_qty)
+                logger.info(
+                    "rebalance item=%s spawned_unfixed_order=%s qty=%.3f",
+                    item, new_oid, new_qty,
+                )
+
+        if not unfixed_oids:
+            continue
+
+        if unfixed_sum <= 0:
+            rounded = _round_allocate(unfixed_oids, target_unfixed)
+            for oid, new_qty in rounded.items():
+                order_qty[oid] = float(new_qty)
+                df.loc[df["order_id"] == oid, "qty"] = float(new_qty)
+            logger.info(
+                "rebalance item=%s demand=%.3f stock=%.3f fixed=%.3f unfixed=%.3f -> %.3f (rounded=%d)",
+                item, demand, stock_qty, fixed_sum, unfixed_sum, target_unfixed, int(round(target_unfixed)),
+            )
+            continue
+
+        factor = target_unfixed / unfixed_sum if unfixed_sum else 1.0
+        if not np.isfinite(factor):
+            factor = 1.0
+        if abs(factor - 1.0) < 1e-9:
+            continue
+
+        # scale (float) then round per order with largest remainder
+        for oid in unfixed_oids:
+            order_qty[oid] = float(order_qty.get(oid, 0.0) or 0.0) * factor
+        rounded = _round_allocate(unfixed_oids, target_unfixed)
+        for oid, new_qty in rounded.items():
+            order_qty[oid] = float(new_qty)
+            df.loc[df["order_id"] == oid, "qty"] = float(new_qty)
+
+        logger.info(
+            "rebalance item=%s demand=%.3f stock=%.3f fixed=%.3f unfixed=%.3f -> %.3f (rounded=%d)",
+            item, demand, stock_qty, fixed_sum, unfixed_sum, target_unfixed, int(round(target_unfixed)),
+        )
+
+    df = df[pd.to_numeric(df.get("qty", 0), errors="coerce").fillna(0.0) > 0].copy()
+    if df.empty and not src.empty:
+        logger.warning("rebalance validation: result is empty, fallback to original schedule")
+        return src
+    return df
 
 
 def _as_date(x: Any):
@@ -70,25 +320,25 @@ def _ensure_positive_int(x: Any) -> int:
 def _dead_load_plan_of_sales(path: Path) -> pd.DataFrame:
     return _L_load_plan_of_sales(path)
     """
-    Ожидаем wide-таблицу:
-      - колонка артикула: 'article' (или item_id/Материал и т.п.)
-      - остальные колонки — даты; значения — qty
+    РћР¶РёРґР°РµРј wide-С‚Р°Р±Р»РёС†Сѓ:
+      - РєРѕР»РѕРЅРєР° Р°СЂС‚РёРєСѓР»Р°: 'article' (РёР»Рё item_id/РњР°С‚РµСЂРёР°Р» Рё С‚.Рї.)
+      - РѕСЃС‚Р°Р»СЊРЅС‹Рµ РєРѕР»РѕРЅРєРё вЂ” РґР°С‚С‹; Р·РЅР°С‡РµРЅРёСЏ вЂ” qty
     """
     df = pd.read_excel(path, sheet_name=0, dtype=object)
     norm = {_norm_col(c): c for c in df.columns}
 
-    # Находим колонку артикула
-    id_candidates = ["article", "item_id", "item", "материал", "артикул"]
+    # РќР°С…РѕРґРёРј РєРѕР»РѕРЅРєСѓ Р°СЂС‚РёРєСѓР»Р°
+    id_candidates = ["article", "item_id", "item", "РјР°С‚РµСЂРёР°Р»", "Р°СЂС‚РёРєСѓР»"]
     item_col = None
     for c in id_candidates:
         if _norm_col(c) in norm:
             item_col = norm[_norm_col(c)]
             break
     if item_col is None:
-        # fallback — первая колонка считаем артикулом
+        # fallback вЂ” РїРµСЂРІР°СЏ РєРѕР»РѕРЅРєР° СЃС‡РёС‚Р°РµРј Р°СЂС‚РёРєСѓР»РѕРј
         item_col = df.columns[0]
 
-    # Дата-колонки — те, что парсятся в дату
+    # Р”Р°С‚Р°-РєРѕР»РѕРЅРєРё вЂ” С‚Рµ, С‡С‚Рѕ РїР°СЂСЃСЏС‚СЃСЏ РІ РґР°С‚Сѓ
     date_cols = []
     for c in df.columns:
         if c == item_col:
@@ -99,7 +349,7 @@ def _dead_load_plan_of_sales(path: Path) -> pd.DataFrame:
 
     if not date_cols:
         raise ValueError(
-            f"В плане не найдены колонки-даты. Нашлись: {list(df.columns)}"
+            f"Р’ РїР»Р°РЅРµ РЅРµ РЅР°Р№РґРµРЅС‹ РєРѕР»РѕРЅРєРё-РґР°С‚С‹. РќР°С€Р»РёСЃСЊ: {list(df.columns)}"
         )
 
     long_df = df.melt(
@@ -124,17 +374,17 @@ def _dead_load_plan_of_sales(path: Path) -> pd.DataFrame:
 
 
 def _legacy_load_machines(path: Path) -> pd.DataFrame:
-    # ... существующий код выше ...
-    # календарь (опционально)
+    # ... СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёР№ РєРѕРґ РІС‹С€Рµ ...
+    # РєР°Р»РµРЅРґР°СЂСЊ (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
     # ...
 
-    # --- НОВОЕ: overload_pct на уровне машины (доля; 0.25 = +25%)
-    overload_cols = ["overload_pct", "overload pct", "overload%", "перегрузка", "перегрузка%"]
+    # --- РќРћР’РћР•: overload_pct РЅР° СѓСЂРѕРІРЅРµ РјР°С€РёРЅС‹ (РґРѕР»СЏ; 0.25 = +25%)
+    overload_cols = ["overload_pct", "overload pct", "overload%", "РїРµСЂРµРіСЂСѓР·РєР°", "РїРµСЂРµРіСЂСѓР·РєР°%"]
     df["overload_pct"] = 0.0
     for oc in overload_cols:
         if _norm_col(oc) in norm:
             s = pd.to_numeric(df[norm[_norm_col(oc)]], errors="coerce").fillna(0.0).astype(float)
-            # если кто-то дал проценты в 0..100 — переведём в долю
+            # РµСЃР»Рё РєС‚Рѕ-С‚Рѕ РґР°Р» РїСЂРѕС†РµРЅС‚С‹ РІ 0..100 вЂ” РїРµСЂРµРІРµРґС‘Рј РІ РґРѕР»СЋ
             df["overload_pct"] = np.where(s > 1.0, s / 100.0, s)
             break
 
@@ -146,22 +396,21 @@ def _legacy_load_machines(path: Path) -> pd.DataFrame:
     return df[keep]
 
 
-
 def _dead_load_bom(path: Path) -> pd.DataFrame:
     return _L_load_bom(path)
     """
-    Поддерживает:
-    B) вашу схему:
+    РџРѕРґРґРµСЂР¶РёРІР°РµС‚:
+    B) РІР°С€Сѓ СЃС…РµРјСѓ:
        - article
-       - operations (шаг)
+       - operations (С€Р°Рі)
        - machine id
-       - machine time (часы/ед) ИЛИ human time (часы/ед)
-       - setting time (часы на операцию, опционально)
-       - root article (иерархия)
-    A) классическую:
-       - item_id / step / machine_id / time_per_unit (мин/ед) [+ setup*] [+ root article?]
+       - machine time (С‡Р°СЃС‹/РµРґ) РР›Р human time (С‡Р°СЃС‹/РµРґ)
+       - setting time (С‡Р°СЃС‹ РЅР° РѕРїРµСЂР°С†РёСЋ, РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
+       - root article (РёРµСЂР°СЂС…РёСЏ)
+    A) РєР»Р°СЃСЃРёС‡РµСЃРєСѓСЋ:
+       - item_id / step / machine_id / time_per_unit (РјРёРЅ/РµРґ) [+ setup*] [+ root article?]
 
-    Возвращает: item_id, step, machine_id, time_per_unit (мин/ед), setup_minutes (мин/оп), root_item_id
+    Р’РѕР·РІСЂР°С‰Р°РµС‚: item_id, step, machine_id, time_per_unit (РјРёРЅ/РµРґ), setup_minutes (РјРёРЅ/РѕРї), root_item_id
     """
     df = pd.read_excel(path, sheet_name=0, dtype=object)
     norm = {_norm_col(c): c for c in df.columns}
@@ -172,22 +421,22 @@ def _dead_load_bom(path: Path) -> pd.DataFrame:
     def col(x: str) -> str:
         return norm[_norm_col(x)]
 
-    # --- Схема B (ваши файлы)
+    # --- РЎС…РµРјР° B (РІР°С€Рё С„Р°Р№Р»С‹)
     if has("article") and (has("machineid") or has("machine id")):
         out = pd.DataFrame()
         out["item_id"] = df[col("article")].astype(str).str.strip()
         out["step"] = pd.to_numeric(df[col("operations")], errors="coerce").fillna(1).astype(int) if has("operations") else 1
         mid_col = col("machineid") if has("machineid") else col("machine id")
         out["machine_id"] = df[mid_col].astype(str).str.strip()
-        # время на ед. (часы -> минуты)
+        # РІСЂРµРјСЏ РЅР° РµРґ. (С‡Р°СЃС‹ -> РјРёРЅСѓС‚С‹)
         if has("machinetime"):
             h = pd.to_numeric(df[col("machinetime")], errors="coerce").fillna(0).astype(float)
         elif has("humantime"):
             h = pd.to_numeric(df[col("humantime")], errors="coerce").fillna(0).astype(float)
         else:
-            raise ValueError("BOM: нет 'machine time' или 'human time' (часы/ед).")
+            raise ValueError("BOM: РЅРµС‚ 'machine time' РёР»Рё 'human time' (С‡Р°СЃС‹/РµРґ).")
         out["time_per_unit"] = h * 60.0
-        # наладка (часы -> минуты)
+        # РЅР°Р»Р°РґРєР° (С‡Р°СЃС‹ -> РјРёРЅСѓС‚С‹)
         if has("settingtime") or has("setting time"):
             sc = col("settingtime") if has("settingtime") else col("setting time")
             out["setup_minutes"] = pd.to_numeric(df[sc], errors="coerce").fillna(0).astype(float) * 60.0
@@ -218,13 +467,13 @@ def _dead_load_bom(path: Path) -> pd.DataFrame:
         if "qty_per_parent" in out.columns: ret_cols.append("qty_per_parent")
         return out[ret_cols]
 
-    # --- Схема A (классика)
+    # --- РЎС…РµРјР° A (РєР»Р°СЃСЃРёРєР°)
     rename_map = {}
     candidates = {
-        "item_id": ["item_id", "item", "article", "материал", "артикул"],
-        "step": ["step", "operations", "operationseq", "opseq", "seq", "sequence", "порядок"],
-        "machine_id": ["machine_id", "machine", "resource", "станок", "машина", "machine id"],
-        "time_per_unit": ["time_per_unit", "proc_time", "duration", "minutes_per_unit", "мин_на_ед", "минутнаед", "machine time"],
+        "item_id": ["item_id", "item", "article", "РјР°С‚РµСЂРёР°Р»", "Р°СЂС‚РёРєСѓР»"],
+        "step": ["step", "operations", "operationseq", "opseq", "seq", "sequence", "РїРѕСЂСЏРґРѕРє"],
+        "machine_id": ["machine_id", "machine", "resource", "СЃС‚Р°РЅРѕРє", "РјР°С€РёРЅР°", "machine id"],
+        "time_per_unit": ["time_per_unit", "proc_time", "duration", "minutes_per_unit", "РјРёРЅ_РЅР°_РµРґ", "РјРёРЅСѓС‚РЅР°РµРґ", "machine time"],
     }
     for k, opts in candidates.items():
         for o in opts:
@@ -236,7 +485,7 @@ def _dead_load_bom(path: Path) -> pd.DataFrame:
     need = {"item_id", "machine_id", "time_per_unit"}
     missing = [c for c in need if c not in df.columns]
     if missing:
-        raise ValueError(f"BOM: отсутствуют {missing}. Нашлись: {list(df.columns)}")
+        raise ValueError(f"BOM: РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚ {missing}. РќР°С€Р»РёСЃСЊ: {list(df.columns)}")
 
     if "step" not in df.columns:
         df["step"] = 1
@@ -250,7 +499,7 @@ def _dead_load_bom(path: Path) -> pd.DataFrame:
     
     df["time_per_unit"] = pd.to_numeric(df["time_per_unit"], errors="coerce").fillna(0).astype(float)
     if df["time_per_unit"].median() < 1.0:
-        df["time_per_unit"] *= 60.0  # часы -> минуты
+        df["time_per_unit"] *= 60.0  # С‡Р°СЃС‹ -> РјРёРЅСѓС‚С‹
 
     df["machine_id"] = df["machine_id"].astype(str).str.strip()
     df["machine_id"] = df["machine_id"] \
@@ -258,9 +507,9 @@ def _dead_load_bom(path: Path) -> pd.DataFrame:
         .str.replace(r"\s+", " ", regex=True)
     
 
-    # setup (опц.)
+    # setup (РѕРїС†.)
     setup_series = None
-    for cand in ["setup_minutes", "setting_time", "setup", "наладка", "setting time"]:
+    for cand in ["setup_minutes", "setting_time", "setup", "РЅР°Р»Р°РґРєР°", "setting time"]:
         if _norm_col(cand) in norm:
             setup_series = pd.to_numeric(df[norm[_norm_col(cand)]], errors="coerce").fillna(0).astype(float)
             if setup_series.median() < 1.0:
@@ -305,7 +554,7 @@ def _dead_load_machines(path: Path) -> pd.DataFrame:
     if has("machine_id"): df = df.rename(columns={col("machine_id"): "machine_id"})
     elif has("machineid"): df = df.rename(columns={col("machineid"): "machine_id"})
     elif has("machine id"): df = df.rename(columns={col("machine id"): "machine_id"})
-    else: raise ValueError("machines: нет колонки machine id / machine_id.")
+    else: raise ValueError("machines: РЅРµС‚ РєРѕР»РѕРЅРєРё machine id / machine_id.")
 
     df["machine_id"] = df["machine_id"].astype(str).str.strip()
     df["machine_id"] = df["machine_id"] \
@@ -314,7 +563,7 @@ def _dead_load_machines(path: Path) -> pd.DataFrame:
     
 
     # capacity_per_day
-    # если есть capacity_per_day (в часах/день) — переведём в минуты
+    # РµСЃР»Рё РµСЃС‚СЊ capacity_per_day (РІ С‡Р°СЃР°С…/РґРµРЅСЊ) вЂ” РїРµСЂРµРІРµРґС‘Рј РІ РјРёРЅСѓС‚С‹
     if "capacity_per_day" in df.columns:
         df["capacity_per_day"] = pd.to_numeric(df["capacity_per_day"], errors="coerce").fillna(0.0)
         df["capacity_per_day"] = df["capacity_per_day"] * 60.0
@@ -324,12 +573,12 @@ def _dead_load_machines(path: Path) -> pd.DataFrame:
         hrs = pd.to_numeric(df[at_col], errors="coerce").fillna(0.0)
         df["capacity_per_day"] = (cnt * hrs * 60.0)
     else:
-        raise ValueError("machines: не найдены поля для расчёта мощности")
+        raise ValueError("machines: РЅРµ РЅР°Р№РґРµРЅС‹ РїРѕР»СЏ РґР»СЏ СЂР°СЃС‡С‘С‚Р° РјРѕС‰РЅРѕСЃС‚Рё")
 
     if "capacity_override" in df.columns:
         df["capacity_override"] = pd.to_numeric(df["capacity_override"], errors="coerce").fillna(pd.NA)
 
-    # календарь (опц.)
+    # РєР°Р»РµРЅРґР°СЂСЊ (РѕРїС†.)
     if has("calendar_date") or has("date"):
         c = col("calendar_date") if has("calendar_date") else col("date")
         df = df.rename(columns={c: "calendar_date"})
@@ -339,9 +588,9 @@ def _dead_load_machines(path: Path) -> pd.DataFrame:
         df = df.rename(columns={c: "capacity_override"})
         df["capacity_override"] = pd.to_numeric(df["capacity_override"], errors="coerce").astype(float)
 
-    # overload_pct (доля; можно 0..100 → переведём)
+    # overload_pct (РґРѕР»СЏ; РјРѕР¶РЅРѕ 0..100 в†’ РїРµСЂРµРІРµРґС‘Рј)
     df["overload_pct"] = 0.0
-    for oc in ["overload_pct", "overload pct", "overload%", "перегрузка", "перегрузка%"]:
+    for oc in ["overload_pct", "overload pct", "overload%", "РїРµСЂРµРіСЂСѓР·РєР°", "РїРµСЂРµРіСЂСѓР·РєР°%"]:
         if has(oc):
             s = pd.to_numeric(df[col(oc)], errors="coerce").fillna(0.0).astype(float)
             df["overload_pct"] = np.where(s > 1.0, s / 100.0, s)
@@ -353,22 +602,20 @@ def _dead_load_machines(path: Path) -> pd.DataFrame:
     return df[keep]
 
 
-
-
 def _dead_load_stock_any(path: Path) -> pd.DataFrame:
     return _L_load_stock_any(path)
     """
-    Загружает Excel с остатками, гибко распознавая названия колонок.
-    Поддерживаемые синонимы:
-      - ключ артикула: 'item_id','item','article','материал','артикул'
-      - количество: 'stock_qty','qty','quantity','остаток','свободныйостаток','free_stock','on_hand','available'
-    Возвращает df с колонками: item_id, stock_qty (float), агрегировано по item_id.
+    Р—Р°РіСЂСѓР¶Р°РµС‚ Excel СЃ РѕСЃС‚Р°С‚РєР°РјРё, РіРёР±РєРѕ СЂР°СЃРїРѕР·РЅР°РІР°СЏ РЅР°Р·РІР°РЅРёСЏ РєРѕР»РѕРЅРѕРє.
+    РџРѕРґРґРµСЂР¶РёРІР°РµРјС‹Рµ СЃРёРЅРѕРЅРёРјС‹:
+      - РєР»СЋС‡ Р°СЂС‚РёРєСѓР»Р°: 'item_id','item','article','РјР°С‚РµСЂРёР°Р»','Р°СЂС‚РёРєСѓР»'
+      - РєРѕР»РёС‡РµСЃС‚РІРѕ: 'stock_qty','qty','quantity','РѕСЃС‚Р°С‚РѕРє','СЃРІРѕР±РѕРґРЅС‹Р№РѕСЃС‚Р°С‚РѕРє','free_stock','on_hand','available'
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ df СЃ РєРѕР»РѕРЅРєР°РјРё: item_id, stock_qty (float), Р°РіСЂРµРіРёСЂРѕРІР°РЅРѕ РїРѕ item_id.
     """
     df = pd.read_excel(path, sheet_name=0, dtype=object)
     norm = {_norm_col(c): c for c in df.columns}
 
-    key_opts = ["item_id","item","article","материал","артикул"]
-    qty_opts = ["stock_qty","qty","quantity","остаток","свободныйостаток","free_stock","on_hand","available"]
+    key_opts = ["item_id","item","article","РјР°С‚РµСЂРёР°Р»","Р°СЂС‚РёРєСѓР»"]
+    qty_opts = ["stock_qty","qty","quantity","РѕСЃС‚Р°С‚РѕРє","СЃРІРѕР±РѕРґРЅС‹Р№РѕСЃС‚Р°С‚РѕРє","free_stock","on_hand","available"]
 
     key_col = None
     for k in key_opts:
@@ -384,7 +631,7 @@ def _dead_load_stock_any(path: Path) -> pd.DataFrame:
             qty_col = norm[_norm_col(q)]
             break
     if qty_col is None:
-        raise ValueError("stock: не найдена колонка количества (например, 'stock_qty'/'qty'/'остаток').")
+        raise ValueError("stock: РЅРµ РЅР°Р№РґРµРЅР° РєРѕР»РѕРЅРєР° РєРѕР»РёС‡РµСЃС‚РІР° (РЅР°РїСЂРёРјРµСЂ, 'stock_qty'/'qty'/'РѕСЃС‚Р°С‚РѕРє').")
 
     out = pd.DataFrame({
         "item_id": df[key_col].astype(str).str.strip(),
@@ -394,351 +641,58 @@ def _dead_load_stock_any(path: Path) -> pd.DataFrame:
     out = out.groupby("item_id", as_index=False)["stock_qty"].sum()
     return out
 
-# --- PATCH START: Netting SQL helpers ---
+# --- Support tables (stock snapshot + order metadata) ---
 
-def _ensure_netting_tables(db: Session):
-    """Создаём недостающие таблицы (минимальная миграция)"""
-    # plan/receipts/stock
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS plan_version (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        author TEXT,
-        status TEXT,
-        horizon_start DATE,
-        horizon_end DATE,
-        origin TEXT,
-        notes TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS plan_line (
-        id INTEGER PRIMARY KEY,
-        plan_version_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        due_date DATE NOT NULL,
-        qty INTEGER NOT NULL,
-        priority DATETIME NULL,
-        customer TEXT NULL,
-        workshop TEXT NULL,
-        source_tag TEXT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_plan_line_main
-    ON plan_line(plan_version_id,item_id,due_date);
-    """))
-
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS receipts_plan (
-        id INTEGER PRIMARY KEY,
-        plan_version_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        due_date DATE NOT NULL,
-        qty INTEGER NOT NULL,
-        workshop TEXT NULL,
-        receipt_type TEXT,
-        source_ref TEXT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_receipts_plan_main
-    ON receipts_plan(plan_version_id,item_id,due_date);
-    """))
-
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS stock_snapshot (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        taken_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS stock_line (
-        id INTEGER PRIMARY KEY,
-        snapshot_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        workshop TEXT DEFAULT '',
-        stock_qty INTEGER NOT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_stock_line_main
-    ON stock_line(snapshot_id,item_id,workshop);
-    """))
-
-    # netting results
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_run (
-        id INTEGER PRIMARY KEY,
-        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        finished_at DATETIME,
-        user TEXT,
-        mode TEXT,
-        plan_version_id INTEGER,
-        stock_snapshot_id INTEGER,
-        bom_version_id TEXT,
-        receipts_source_desc TEXT,
-        params TEXT,
-        status TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_order (
-        id INTEGER PRIMARY KEY,
-        netting_run_id INTEGER NOT NULL,
-        order_id TEXT,
-        item_id TEXT,
-        due_date DATE,
-        qty INTEGER,
-        priority DATETIME NULL,
-        workshop TEXT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_netting_order
-    ON netting_order(netting_run_id,item_id,due_date);
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_log_row (
-        id INTEGER PRIMARY KEY,
-        netting_run_id INTEGER NOT NULL,
-        item_id TEXT,
-        workshop TEXT,
-        date DATE NULL,
-        kind TEXT,
-        opening_exact INTEGER NULL,
-        opening_generic INTEGER NULL,
-        stock_used_exact INTEGER,
-        stock_used_generic INTEGER,
-        receipts_used INTEGER,
-        order_created INTEGER,
-        available_after INTEGER
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_netting_log_row
-    ON netting_log_row(netting_run_id,item_id,workshop,date);
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_summary_row (
-        id INTEGER PRIMARY KEY,
-        netting_run_id INTEGER NOT NULL,
-        item_id TEXT,
-        workshop TEXT,
-        stock_used_total INTEGER,
-        receipts_used_total INTEGER,
-        orders_created_total INTEGER,
-        opening_exact_init INTEGER NULL,
-        opening_generic_init INTEGER NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_netting_summary_row
-    ON netting_summary_row(netting_run_id,item_id,workshop);
-    """))
-    # demand linkage table
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS demand_linkage (
-        id INTEGER PRIMARY KEY,
-        netting_run_id INTEGER NOT NULL,
-        parent_item_id TEXT,
-        parent_due_date DATE,
-        child_item_id TEXT,
-        child_due_date DATE,
-        qty_per_parent REAL,
-        required_qty INTEGER
-    );
-    """))
-    # order info (due_date) per plan for reports
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS plan_order_info (
-        plan_id INTEGER,
-        order_id TEXT,
-        due_date DATE,
-        PRIMARY KEY (plan_id, order_id)
-    );
-    """))
+def _ensure_support_tables(db: Session) -> None:
+    """Ensure auxiliary tables used by reports and stock snapshots exist (SQLite)."""
+    stmts = [
+        """
+        CREATE TABLE IF NOT EXISTS stock_snapshot (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            taken_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS stock_line (
+            id INTEGER PRIMARY KEY,
+            snapshot_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            workshop TEXT DEFAULT '',
+            stock_qty INTEGER NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_stock_line_main
+        ON stock_line(snapshot_id,item_id,workshop)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS plan_order_info (
+            plan_id INTEGER,
+            order_id TEXT,
+            due_date DATE,
+            PRIMARY KEY (plan_id, order_id)
+        )
+        """,
+    ]
+    for sql in stmts:
+        db.execute(text(sql))
     db.commit()
-
-
-def _load_receipts_from_db(
-    db: Session,
-    plan_version_id: int | None,
-    receipts_from: Literal["plan", "firmed", "both"] = "plan",
-) -> pd.DataFrame:
-    """
-    Строим existing_orders_df для неттинга из БД.
-    Пока берём только receipts_plan (вариант 'plan' и часть 'both').
-    Хук под 'firmed' оставлен на будущее (из таблиц расписания).
-    """
-    parts: list[pd.DataFrame] = []
-
-    if receipts_from in ("plan", "both"):
-        q = text("""
-            SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-            FROM receipts_plan
-            WHERE plan_version_id = :p
-        """)
-        rows = db.execute(q, {"p": plan_version_id}).mappings().all()
-        if rows:
-            parts.append(pd.DataFrame(rows))
-
-    # TODO: if receipts_from in ("firmed","both"): подтянуть firmed-расписания
-
-    if not parts:
-        return pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-
-    df = pd.concat(parts, ignore_index=True)
-    df["item_id"]  = df["item_id"].astype(str).str.strip()
-    df["workshop"] = df["workshop"].astype(str).fillna("")
-    df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
-    df["qty"]      = pd.to_numeric(df["qty"], errors="coerce").fillna(0).astype(int)
-    return df
-
-
-def _load_stock_snapshot(db: Session, stock_snapshot_id: int) -> pd.DataFrame:
-    q = text("""
-        SELECT item_id, COALESCE(workshop,'') AS workshop, stock_qty
-        FROM stock_line
-        WHERE snapshot_id = :s
-    """)
-    rows = db.execute(q, {"s": stock_snapshot_id}).mappings().all()
-    if not rows:
-        return pd.DataFrame(columns=["item_id","workshop","stock_qty"])
-    df = pd.DataFrame(rows)
-    df["item_id"]   = df["item_id"].astype(str).str.strip()
-    df["workshop"]  = df["workshop"].astype(str).fillna("")
-    df["stock_qty"] = pd.to_numeric(df["stock_qty"], errors="coerce").fillna(0).astype(int)
-    # схлопнем дубли
-    return df.groupby(["item_id","workshop"], as_index=False)["stock_qty"].sum()
-
-
-def _save_netting_results_to_db(
-    db: Session,
-    run_meta: dict,
-    demand_net: pd.DataFrame,
-    netting_log: pd.DataFrame,
-    netting_summary: pd.DataFrame,
-    linkage_df: pd.DataFrame | None = None,
-) -> int:
-    """
-    Сохраняем все артефакты неттинга. Возвращаем netting_run.id
-    """
-    # run header
-    ins = text("""
-      INSERT INTO netting_run (started_at, finished_at, user, mode, plan_version_id,
-                               stock_snapshot_id, bom_version_id, receipts_source_desc, params, status)
-      VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :user, :mode, :plan_version_id,
-              :stock_snapshot_id, :bom_version_id, :receipts_source_desc, :params, 'done')
-      RETURNING id
-    """)
-    rid = db.execute(
-        ins,
-        {
-            "user": run_meta.get("user","ui"),
-            "mode": "product_view",
-            "plan_version_id": run_meta.get("plan_version_id"),
-            "stock_snapshot_id": run_meta.get("stock_snapshot_id"),
-            "bom_version_id": run_meta.get("bom_version_id",""),
-            "receipts_source_desc": run_meta.get("receipts_source_desc","plan"),
-            "params": json.dumps(run_meta.get("params",{}), ensure_ascii=False),
-        },
-    ).scalar_one()
-
-    # orders
-    if not demand_net.empty:
-        payload = demand_net.copy()
-        for col in ("order_id","item_id","workshop"):
-            if col not in payload.columns:
-                payload[col] = ""
-        # Normalize to string to avoid sqlite binding issues with pandas Timestamps
-        payload["priority"] = pd.to_datetime(payload["priority"]).dt.strftime("%Y-%m-%d %H:%M:%S")
-        rows = payload[["order_id","item_id","due_date","qty","priority","workshop"]].to_dict("records")
-        db.execute(text("""
-            INSERT INTO netting_order (netting_run_id, order_id, item_id, due_date, qty, priority, workshop)
-            VALUES (:rid, :order_id, :item_id, :due_date, :qty, :priority, :workshop)
-        """), [dict(r, rid=rid) for r in rows])
-
-    # log
-    if not netting_log.empty:
-        log = netting_log.copy()
-        try:
-            import pandas as _pd
-            if "date" in log.columns:
-                log["date"] = _pd.to_datetime(log["date"], errors="coerce").dt.date
-                log["date"] = log["date"].where(log["date"].notna(), None)
-            for c in [
-                "opening_exact","opening_generic",
-                "stock_used_exact","stock_used_generic",
-                "receipts_used","order_created","available_after",
-            ]:
-                if c in log.columns:
-                    log[c] = _pd.to_numeric(log[c], errors="coerce")
-                    log[c] = log[c].where(log[c].notna(), None)
-        except Exception:
-            pass
-        rows = log.to_dict("records")
-        db.execute(text("""
-            INSERT INTO netting_log_row
-            (netting_run_id, item_id, workshop, date, kind,
-             opening_exact, opening_generic,
-             stock_used_exact, stock_used_generic,
-             receipts_used, order_created, available_after)
-            VALUES
-            (:rid, :item_id, :workshop, :date, :kind,
-             :opening_exact, :opening_generic,
-             :stock_used_exact, :stock_used_generic,
-             :receipts_used, :order_created, :available_after)
-        """), [dict(r, rid=rid) for r in rows])
-
-    # summary
-    if not netting_summary.empty:
-        rows = netting_summary.to_dict("records")
-        db.execute(text("""
-            INSERT INTO netting_summary_row
-            (netting_run_id, item_id, workshop,
-             stock_used_total, receipts_used_total, orders_created_total,
-             opening_exact_init, opening_generic_init)
-            VALUES
-            (:rid, :item_id, :workshop,
-             :stock_used_total, :receipts_used_total, :orders_created_total,
-             :opening_exact_init, :opening_generic_init)
-        """), [dict(r, rid=rid) for r in rows])
-
-    # linkage (опционально)
-    if linkage_df is not None and not linkage_df.empty:
-        rows = linkage_df.to_dict("records")
-        db.execute(text("""
-            INSERT INTO demand_linkage
-            (netting_run_id, parent_item_id, parent_due_date,
-             child_item_id, child_due_date, qty_per_parent, required_qty)
-            VALUES
-            (:rid, :parent_item_id, :parent_due_date,
-             :child_item_id, :child_due_date, :qty_per_parent, :required_qty)
-        """), [dict(r, rid=rid) for r in rows])
-
-    db.commit()
-    return int(rid)
-
-# --- PATCH END ---
-
 
 
 def compute_orders_timeline(sched: pd.DataFrame) -> pd.DataFrame:
     """
-    Таймлайн по каждому order_id:
+    РўР°Р№РјР»Р°Р№РЅ РїРѕ РєР°Р¶РґРѕРјСѓ order_id:
       start_date, finish_date, duration_days, due_date, finish_lag.
-    Ожидаемые колонки в sched: order_id, item_id, date, due_date.
+    РћР¶РёРґР°РµРјС‹Рµ РєРѕР»РѕРЅРєРё РІ sched: order_id, item_id, date, due_date.
     """
     if sched.empty:
         return pd.DataFrame(columns=[
             "order_id","item_id","start_date","finish_date","duration_days","due_date","finish_lag"
         ])
 
-    # убеждаемся в корректных типах дат
+    # СѓР±РµР¶РґР°РµРјСЃСЏ РІ РєРѕСЂСЂРµРєС‚РЅС‹С… С‚РёРїР°С… РґР°С‚
     df = sched.copy()
     df["date"] = pd.to_datetime(df["date"])
     df["due_date"] = pd.to_datetime(df["due_date"])
@@ -751,7 +705,7 @@ def compute_orders_timeline(sched: pd.DataFrame) -> pd.DataFrame:
     )
     g["duration_days"] = (g["finish_date"] - g["start_date"]).dt.days + 1
     g["finish_lag"] = (g["finish_date"] - g["due_date"]).dt.days
-    # приводим к date
+    # РїСЂРёРІРѕРґРёРј Рє date
     g["start_date"] = g["start_date"].dt.date
     g["finish_date"] = g["finish_date"].dt.date
     g["due_date"] = g["due_date"].dt.date
@@ -763,9 +717,9 @@ def compute_orders_timeline(sched: pd.DataFrame) -> pd.DataFrame:
 
 def compute_order_items_timeline(sched: pd.DataFrame) -> pd.DataFrame:
     """
-    Таймлайн по каждой паре (order_id, item_id):
+    РўР°Р№РјР»Р°Р№РЅ РїРѕ РєР°Р¶РґРѕР№ РїР°СЂРµ (order_id, item_id):
       start_date, finish_date, duration_days, due_date, finish_lag.
-    Полезно, если включён split_child_orders и order_id = "<base>:<item>".
+    РџРѕР»РµР·РЅРѕ, РµСЃР»Рё РІРєР»СЋС‡С‘РЅ split_child_orders Рё order_id = "<base>:<item>".
     """
     if sched.empty:
         return pd.DataFrame(columns=[
@@ -792,17 +746,16 @@ def compute_order_items_timeline(sched: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-
 # =========================
 # Demand / order_id
 # =========================
 def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:
-    # ожидание: длинный формат с колонками item_id, due_date, qty
-    # если пришёл «широкий», прогоните через load_plan_of_sales ДО вызова build_demand (см. run_pipeline ниже)
+    # РѕР¶РёРґР°РЅРёРµ: РґР»РёРЅРЅС‹Р№ С„РѕСЂРјР°С‚ СЃ РєРѕР»РѕРЅРєР°РјРё item_id, due_date, qty
+    # РµСЃР»Рё РїСЂРёС€С‘Р» В«С€РёСЂРѕРєРёР№В», РїСЂРѕРіРѕРЅРёС‚Рµ С‡РµСЂРµР· load_plan_of_sales Р”Рћ РІС‹Р·РѕРІР° build_demand (СЃРј. run_pipeline РЅРёР¶Рµ)
     g = plan_df.groupby(["item_id", "due_date"], as_index=False).agg(qty=("qty", "sum"))
     g = g.sort_values(["due_date", "item_id"]).reset_index(drop=True)
 
-    # стабильный order_id: (item_id, due_date, seq)
+    # СЃС‚Р°Р±РёР»СЊРЅС‹Р№ order_id: (item_id, due_date, seq)
     from collections import defaultdict
     seq = defaultdict(int)
     order_ids = []
@@ -812,9 +765,8 @@ def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:
         oid = f'{r["item_id"]}-{pd.to_datetime(r["due_date"]).strftime("%Y%m%d")}-{seq[key]:04d}'
         order_ids.append(oid)
     g["order_id"] = order_ids
-    g["priority"] = pd.to_datetime(g["due_date"])  # важно: реальная дата, а не 0
+    g["priority"] = pd.to_datetime(g["due_date"])  # РІР°Р¶РЅРѕ: СЂРµР°Р»СЊРЅР°СЏ РґР°С‚Р°, Р° РЅРµ 0
     return g[["order_id", "item_id", "due_date", "qty", "priority"]]
-
 
 
 # =========================
@@ -824,8 +776,8 @@ def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_bom_hierarchy(bom: pd.DataFrame) -> pd.DataFrame:
     """
-    Возвращает таблицу ссылок root->child и уровень (0=корень верхнего уровня).
-    Учитывает только пары, где root_item_id непустой.
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ С‚Р°Р±Р»РёС†Сѓ СЃСЃС‹Р»РѕРє root->child Рё СѓСЂРѕРІРµРЅСЊ (0=РєРѕСЂРµРЅСЊ РІРµСЂС…РЅРµРіРѕ СѓСЂРѕРІРЅСЏ).
+    РЈС‡РёС‚С‹РІР°РµС‚ С‚РѕР»СЊРєРѕ РїР°СЂС‹, РіРґРµ root_item_id РЅРµРїСѓСЃС‚РѕР№.
     """
     links = bom[["item_id","root_item_id"]].drop_duplicates()
     links = links[links["root_item_id"].fillna("").astype(str).str.len() > 0].copy()
@@ -833,7 +785,7 @@ def build_bom_hierarchy(bom: pd.DataFrame) -> pd.DataFrame:
         links["level"] = 0
         return links
 
-    # оценим уровни рекурсивно (простая топология по цепочкам)
+    # РѕС†РµРЅРёРј СѓСЂРѕРІРЅРё СЂРµРєСѓСЂСЃРёРІРЅРѕ (РїСЂРѕСЃС‚Р°СЏ С‚РѕРїРѕР»РѕРіРёСЏ РїРѕ С†РµРїРѕС‡РєР°Рј)
     parents = {r.item_id: r.root_item_id for r in links.itertuples(index=False)}
     level = {}
     def lvl(x, seen=None):
@@ -851,294 +803,23 @@ def build_bom_hierarchy(bom: pd.DataFrame) -> pd.DataFrame:
     for it in items:
         lvl(it)
 
-    # уровень child = lvl(child), корень выше по числу
+    # СѓСЂРѕРІРµРЅСЊ child = lvl(child), РєРѕСЂРµРЅСЊ РІС‹С€Рµ РїРѕ С‡РёСЃР»Сѓ
     links["level"] = links["item_id"].map(level).fillna(0).astype(int)
     return links.sort_values(["level","root_item_id","item_id"]).reset_index(drop=True)
 
-# === Product View (SAP APO-style netting) =====================================
-# Вверху файла рядом с импортами
-NETTING_LOG = None
-
-def product_view_generate_demand(
-    plan_df: pd.DataFrame,
-    bom: pd.DataFrame,
-    stock_df: pd.DataFrame | None = None,
-    existing_orders_df: pd.DataFrame | None = None
-) -> pd.DataFrame:
-    """
-    Product-View netting (time-phased) по ВСЕМ article:
-      1) разворачиваем спрос по BOM (учитывая qty_per_parent),
-      2) для каждой (item_id, workshop) идём по датам, покрывая: склад exact -> склад generic -> поступления <= t,
-      3) остаток порождает новый order на дату t.
-
-    Пишем детальный NETTING_LOG: opening*, stock_used*, receipts_used, order_created, available_after.
-    """
-    global NETTING_LOG
-
-    # --- helpers ---
-    def C(df, name):
-        m = {str(c).lower(): c for c in df.columns}
-        return m.get(name.lower(), name)
-
-    # 0) Нормализуем и построим начальный demand
-    need = ["item_id","due_date","qty"]
-    miss = [n for n in need if C(plan_df, n) not in plan_df.columns]
-    if miss:
-        raise ValueError("plan_df must contain item_id, due_date, qty")
-
-    base_plan = (plan_df
-                 .rename(columns={C(plan_df,"item_id"):"item_id",
-                                  C(plan_df,"due_date"):"due_date",
-                                  C(plan_df,"qty"):"qty"})
-                 .copy())
-    base_plan["item_id"]  = base_plan["item_id"].astype(str).str.strip()
-    base_plan["due_date"] = pd.to_datetime(base_plan["due_date"]).dt.date
-    base_plan["qty"]      = pd.to_numeric(base_plan["qty"], errors="coerce").fillna(0).astype(int)
-
-
-    
-    # Превратим в формат demand с order_id/priority
-    demand0 = build_demand(base_plan)  # order_id, item_id, due_date, qty, priority
-    # 0.1) Защитимся от фиктивного "0" в плане
-    base_plan["item_id"] = base_plan["item_id"].astype(str).str.strip()
-    bad_zero = base_plan[base_plan["item_id"] == "0"]["qty"].sum()
-    if bad_zero:
-        logging.warning("Plan contains demand for item_id=0 (qty=%s). It will be ignored.", bad_zero)
-        base_plan = base_plan[base_plan["item_id"] != "0"]
-    
-    # 1) Чистим BOM от фиктивных корней и нулевых позиций + схлопываем дубли
-    b = bom.copy()
-    b["root_item_id"] = b["root_item_id"].astype(str).str.strip()
-    b["item_id"]      = b["item_id"].astype(str).str.strip()
-    b = b[b["root_item_id"] != b["item_id"]]
-    b = b[(b["root_item_id"] != "0") & (b["item_id"] != "0")]
-    
-    if "qty_per_parent" not in b.columns:
-        b["qty_per_parent"] = 1
-    b["qty_per_parent"] = pd.to_numeric(b["qty_per_parent"], errors="coerce").fillna(0)
-    
-    b = (b.groupby(["root_item_id","item_id"], as_index=False)["qty_per_parent"]
-           .sum())
-    
-    # 1) Разворачиваем спрос по ЧИСТОМУ BOM
-    exp = expand_demand_with_hierarchy(build_demand(base_plan), b, split_child_orders=True)
-
-    # item -> workshop (если есть)
-    item_workshop = {}
-    if "workshop" in bom.columns:
-        bw = bom[["item_id","workshop"]].dropna().drop_duplicates("item_id")
-        item_workshop = dict(zip(bw["item_id"].astype(str), bw["workshop"].astype(str)))
-    exp["workshop"] = exp["item_id"].map(item_workshop).fillna("")
-
-    # Сводим потребности по (item, workshop, due_date)
-    dem = (exp.groupby(["item_id","workshop","due_date"], as_index=False)["qty"]
-              .sum().sort_values(["item_id","workshop","due_date"]))
-
-    # 2) Подготовим склад (exact и generic)
-    if stock_df is None:
-        stock_df = pd.DataFrame(columns=["item_id","stock_qty","workshop"])
-    s = stock_df.copy()
-    if "workshop" not in s.columns:
-        s["workshop"] = ""
-    s["item_id"] = s["item_id"].astype(str).str.strip()
-    s["workshop"] = s["workshop"].astype(str).fillna("")
-    s["stock_qty"] = pd.to_numeric(s["stock_qty"], errors="coerce").fillna(0).astype(int)
-
-    stock_exact = (s.groupby(["item_id","workshop"], as_index=False)["stock_qty"]
-                     .sum().set_index(["item_id","workshop"])["stock_qty"].to_dict())
-    stock_generic = (s[s["workshop"] == ""]
-                       .groupby(["item_id","workshop"], as_index=False)["stock_qty"]
-                       .sum().set_index(["item_id","workshop"])["stock_qty"].to_dict())
-
-    # 3) Поступления (существующие заказы) накапливаем по времени
-    if existing_orders_df is None:
-        existing_orders_df = pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-    rec = existing_orders_df.copy()
-    if "workshop" not in rec.columns:
-        rec["workshop"] = ""
-    rec["item_id"]  = rec["item_id"].astype(str).str.strip()
-    rec["workshop"] = rec["workshop"].astype(str).fillna("")
-    rec["due_date"] = pd.to_datetime(rec["due_date"]).dt.date
-    rec["qty"]      = pd.to_numeric(rec["qty"], errors="coerce").fillna(0).astype(int)
-    receipts = (rec.groupby(["item_id","workshop","due_date"], as_index=False)["qty"]
-                  .sum().sort_values(["item_id","workshop","due_date"]))
-
-    out_orders, log_rows, seq = [], [], {}
-
-    # 4) Идём по каждой паре (item, workshop) и по датам
-    for (it, wk), block in dem.groupby(["item_id","workshop"]):
-        block = block.sort_values("due_date")
-
-        # стартовые остатки для пары
-        remain_exact   = float(stock_exact.get((it, wk), 0.0))
-        remain_generic = float(stock_generic.get((it, ""), 0.0))
-        receipts_remain = 0.0
-
-        # лог открытия
-        log_rows.append({
-            "item_id": it, "workshop": wk, "date": None, "kind": "opening",
-            "opening_exact": int(remain_exact), "opening_generic": int(remain_generic),
-            "stock_used_exact": 0, "stock_used_generic": 0,
-            "receipts_used": 0, "order_created": 0, "available_after": int(remain_exact + remain_generic)
-        })
-
-        # блок поступлений по паре
-        rb = receipts[(receipts["item_id"] == it) & (receipts["workshop"] == wk)].sort_values("due_date")
-        r_dates = rb["due_date"].tolist()
-        r_qtys  = rb["qty"].tolist()
-        ridx = 0
-
-        for r in block.itertuples(index=False):
-            dd, need = r.due_date, int(r.qty)
-
-            # начисляем все receipts со сроком <= dd
-            while ridx < len(r_dates) and r_dates[ridx] <= dd:
-                receipts_remain += float(r_qtys[ridx])
-                ridx += 1
-
-            # склад exact -> generic
-            stock_used_exact = min(need, int(remain_exact))
-            need -= stock_used_exact
-            remain_exact -= stock_used_exact
-
-            stock_used_generic = 0
-            if need > 0:
-                stock_used_generic = min(need, int(remain_generic))
-                need -= stock_used_generic
-                remain_generic -= stock_used_generic
-
-            # поступления
-            receipts_used = 0
-            if need > 0 and receipts_remain > 0:
-                take = min(need, int(receipts_remain))
-                receipts_used = take
-                receipts_remain -= take
-                need -= take
-
-            # остаток → новый order
-            order_created = 0
-            if need > 0:
-                order_created = need
-                key = (it, pd.to_datetime(dd).date())
-                seq[key] = seq.get(key, 0) + 1
-                oid = f"{it}-{pd.to_datetime(dd).strftime('%Y%m%d')}-PV{seq[key]:03d}"
-                out_orders.append({
-                    "order_id": oid, "item_id": it, "due_date": dd,
-                    "qty": order_created, "priority": pd.to_datetime(dd), "workshop": wk,
-                })
-                need = 0
-
-            available_after = int(remain_exact + remain_generic + receipts_remain)
-
-            log_rows.append({
-                "item_id": it, "workshop": wk, "date": dd, "kind": "day",
-                "opening_exact": None, "opening_generic": None,
-                "stock_used_exact": int(stock_used_exact),
-                "stock_used_generic": int(stock_used_generic),
-                "receipts_used": int(receipts_used),
-                "order_created": int(order_created),
-                "available_after": int(available_after),
-            })
-
-    NETTING_LOG = pd.DataFrame(log_rows, columns=[
-        "item_id","workshop","date","kind",
-        "opening_exact","opening_generic",
-        "stock_used_exact","stock_used_generic",
-        "receipts_used","order_created","available_after"
-    ])
-
-    return pd.DataFrame(out_orders, columns=["order_id","item_id","due_date","qty","priority","workshop"])
-
-
-
-
-    def C(df, name):  # безопасный доступ к столбцам в любом регистре
-        m = {c.lower(): c for c in df.columns}
-        return m.get(name.lower(), name)
-
-    # --- item -> workshop
-    item_workshop = {}
-    if "workshop" in bom.columns:
-        bw = (bom[["item_id", "workshop"]]
-              .dropna()
-              .drop_duplicates("item_id"))
-        item_workshop = dict(zip(bw["item_id"].astype(str), bw["workshop"].astype(str)))
-
-    # --- агрегированный спрос
-    demand = (plan_df
-              .rename(columns={C(plan_df,"item_id"):"item_id",
-                               C(plan_df,"due_date"):"due_date",
-                               C(plan_df,"qty"):"qty"})
-              .groupby(["item_id","due_date"], as_index=False)
-              .agg(qty=("qty","sum")))
-    demand["item_id"] = demand["item_id"].astype(str)
-    demand["workshop"] = demand["item_id"].map(item_workshop).fillna("")
-
-    # --- склад {(item, workshop)->qty}
-    if stock_df is None:
-        stock_df = pd.DataFrame(columns=["item_id","stock_qty","workshop"])
-    stock_df = stock_df.copy()
-    if "workshop" not in stock_df.columns:
-        stock_df["workshop"] = ""
-    stock_df["item_id"] = stock_df["item_id"].astype(str)
-    stock_df["workshop"] = stock_df["workshop"].astype(str)
-    stock_map = (stock_df.groupby(["item_id","workshop"], as_index=False)["stock_qty"]
-                       .sum().set_index(["item_id","workshop"])["stock_qty"].to_dict())
-
-    # --- уже созданные заказы как поступления {(item, due_date, workshop)->qty}
-    if existing_orders_df is None:
-        existing_orders_df = pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-    rec = existing_orders_df.copy()
-    if "workshop" not in rec.columns:
-        rec["workshop"] = ""
-    rec["item_id"] = rec["item_id"].astype(str)
-    rec["workshop"] = rec["workshop"].astype(str)
-    receipt_map = (rec.groupby(["item_id","due_date","workshop"], as_index=False)["qty"]
-                     .sum().set_index(["item_id","due_date","workshop"])["qty"].to_dict())
-
-    # --- чистая потребность → формируем новые заказы на дельту
-    rows, seq = [], {}
-    for r in demand.itertuples(index=False):
-        it, dd, qty, wk = str(r.item_id), r.due_date, int(r.qty), str(r.workshop)
-
-        # 1) склад (по цеху; если нужен фолбэк на общий, добавь ключ (it,""))
-        key_sw = (it, wk)
-        avail = float(stock_map.get(key_sw, 0.0))
-        if avail >= qty:
-            stock_map[key_sw] = avail - qty
-            continue
-        elif avail > 0:
-            qty -= int(avail)
-            stock_map[key_sw] = 0.0
-
-        # 2) уже созданные заказы на эту дату (поступления)
-        exist = float(receipt_map.get((it, dd, wk), 0.0))
-        if exist >= qty:
-            continue
-        elif exist > 0:
-            qty -= int(exist)
-
-        if qty <= 0:
-            continue
-
-        # 3) создаём отдельный заказ на дельту
-        seq_key = (it, pd.to_datetime(dd).date())
-        seq[seq_key] = seq.get(seq_key, 0) + 1
-        oid = f"{it}-{pd.to_datetime(dd).strftime('%Y%m%d')}-PV{seq[seq_key]:03d}"
-        rows.append({
-            "order_id": oid,
-            "item_id": it,
-            "due_date": dd,
-            "qty": int(qty),
-            "priority": pd.to_datetime(dd),
-            "workshop": wk,
-        })
-
-    return pd.DataFrame(rows, columns=["order_id","item_id","due_date","qty","priority","workshop"])
+# Р’РІРµСЂС…Сѓ С„Р°Р№Р»Р° СЂСЏРґРѕРј СЃ РёРјРїРѕСЂС‚Р°РјРё
 # ============================================================================
 
 
-def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, split_child_orders: bool = False, include_parents: bool = False) -> pd.DataFrame:
+def expand_demand_with_hierarchy(
+    demand: pd.DataFrame,
+    bom: pd.DataFrame,
+    *,
+    split_child_orders: bool = False,
+    include_parents: bool = False,
+    reserved_order_ids: Iterable[str] | None = None,
+    fixed_order_qty: dict[str, float] | None = None,
+) -> pd.DataFrame:
     # Build parent and children maps from BOM
     parents: dict[str, str] = {}
     children_map: dict[str, dict[str, float]] = {}
@@ -1149,7 +830,7 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
         if p and p != c:
             children_map.setdefault(p, {})[c] = float(getattr(r, "qty_per_parent", 1.0)) or 1.0
 
-    # Вспомогательные обходы
+    # Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ РѕР±С…РѕРґС‹
     def ancestors(x: str) -> list[str]:
         out = []
         seen = set()
@@ -1165,9 +846,9 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
 
     def descendants_with_factor(x: str) -> list[tuple[str, float, str]]:
         """
-        Возвращаем всех потомков с накопленным коэффициентом.
-        Глобально не дедупим, чтобы ребёнок мог прийти по нескольким родительским веткам;
-        цикл обрываем только по текущему пути.
+        Р’РѕР·РІСЂР°С‰Р°РµРј РІСЃРµС… РїРѕС‚РѕРјРєРѕРІ СЃ РЅР°РєРѕРїР»РµРЅРЅС‹Рј РєРѕСЌС„С„РёС†РёРµРЅС‚РѕРј.
+        Р“Р»РѕР±Р°Р»СЊРЅРѕ РЅРµ РґРµРґСѓРїРёРј, С‡С‚РѕР±С‹ СЂРµР±С‘РЅРѕРє РјРѕРі РїСЂРёР№С‚Рё РїРѕ РЅРµСЃРєРѕР»СЊРєРёРј СЂРѕРґРёС‚РµР»СЊСЃРєРёРј РІРµС‚РєР°Рј;
+        С†РёРєР» РѕР±СЂС‹РІР°РµРј С‚РѕР»СЊРєРѕ РїРѕ С‚РµРєСѓС‰РµРјСѓ РїСѓС‚Рё.
         """
         out = []
         stack = [(x, 1.0, {x})]  # cur, factor, path
@@ -1189,20 +870,20 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
         qty = int(r.qty)
         pr = r.priority
 
-        # сам спрос (FG)
+        # СЃР°Рј СЃРїСЂРѕСЃ (FG)
         rows.append(dict(
             base_order_id=base_oid,
             order_id=(f"{base_oid}:{it}" if split_child_orders else base_oid),
             item_id=it, due_date=due, qty=qty, priority=pr, role="FG"
         ))
-        # предки (без масштабирования)
+        # РїСЂРµРґРєРё (Р±РµР· РјР°СЃС€С‚Р°Р±РёСЂРѕРІР°РЅРёСЏ)
         for a in ancestors(it):
             rows.append(dict(
                 base_order_id=base_oid,
                 order_id=(f"{base_oid}:{a}" if split_child_orders else base_oid),
                 item_id=a, due_date=due, qty=qty, priority=pr, role="PARENT"
             ))
-        # потомки (масштабируем вниз)
+        # РїРѕС‚РѕРјРєРё (РјР°СЃС€С‚Р°Р±РёСЂСѓРµРј РІРЅРёР·)
         for d, fmul, parent in descendants_with_factor(it):
             rows.append(dict(
                 base_order_id=base_oid,
@@ -1213,12 +894,12 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
 
     exp = pd.DataFrame(rows)
     if exp.empty:
-        raise ValueError("Greedy: expanded_demand is empty — проверьте BOM/план.")
-    # depth для сортировки: строим уровни из BOM
+        raise ValueError("Greedy: expanded_demand is empty вЂ” РїСЂРѕРІРµСЂСЊС‚Рµ BOM/РїР»Р°РЅ.")
+    # depth РґР»СЏ СЃРѕСЂС‚РёСЂРѕРІРєРё: СЃС‚СЂРѕРёРј СѓСЂРѕРІРЅРё РёР· BOM
     links = build_bom_hierarchy(bom)
     depth_map = {r.item_id: int(r.level) for r in links.itertuples(index=False)} if not links.empty else {}
     exp["depth"] = exp["item_id"].map(depth_map).fillna(0).astype(int)
-    # Стабильная сортировка: сначала приоритет, затем depth
+    # РЎС‚Р°Р±РёР»СЊРЅР°СЏ СЃРѕСЂС‚РёСЂРѕРІРєР°: СЃРЅР°С‡Р°Р»Р° РїСЂРёРѕСЂРёС‚РµС‚, Р·Р°С‚РµРј depth
     exp = exp.sort_values(["priority","depth","item_id"], kind="stable").reset_index(drop=True)
     return exp
 
@@ -1233,24 +914,26 @@ def greedy_schedule(
     guard_limit_days: int = 200 * 365,
     stock_map: dict | None = None,
     include_parents: bool = False,
+    reserved_order_ids: Iterable[str] | None = None,
+    fixed_order_qty: dict[str, float] | None = None,
     expand: bool = True,
 ) -> pd.DataFrame:
     """
-    Планировщик с маршрутами (step), наладкой, иерархией BOM и перегрузкой.
+    РџР»Р°РЅРёСЂРѕРІС‰РёРє СЃ РјР°СЂС€СЂСѓС‚Р°РјРё (step), РЅР°Р»Р°РґРєРѕР№, РёРµСЂР°СЂС…РёРµР№ BOM Рё РїРµСЂРµРіСЂСѓР·РєРѕР№.
 
-    Режимы:
-      - ASAP (align_roots_to_due=False): планируем вперёд от start_date.
-      - JIT  (align_roots_to_due=True): корневой item (role='FG') заканчивает ровно в due_date,
-        его потомки планируются НАЗАД так, чтобы закончить не позже старта родителя, и не стартовать ранее 'today'.
+    Р РµР¶РёРјС‹:
+      - ASAP (align_roots_to_due=False): РїР»Р°РЅРёСЂСѓРµРј РІРїРµСЂС‘Рґ РѕС‚ start_date.
+      - JIT  (align_roots_to_due=True): РєРѕСЂРЅРµРІРѕР№ item (role='FG') Р·Р°РєР°РЅС‡РёРІР°РµС‚ СЂРѕРІРЅРѕ РІ due_date,
+        РµРіРѕ РїРѕС‚РѕРјРєРё РїР»Р°РЅРёСЂСѓСЋС‚СЃСЏ РќРђР—РђР” С‚Р°Рє, С‡С‚РѕР±С‹ Р·Р°РєРѕРЅС‡РёС‚СЊ РЅРµ РїРѕР·Р¶Рµ СЃС‚Р°СЂС‚Р° СЂРѕРґРёС‚РµР»СЏ, Рё РЅРµ СЃС‚Р°СЂС‚РѕРІР°С‚СЊ СЂР°РЅРµРµ 'today'.
 
-    В расписание добавляется 'base_order_id' (если split_child_orders=True).
+    Р’ СЂР°СЃРїРёСЃР°РЅРёРµ РґРѕР±Р°РІР»СЏРµС‚СЃСЏ 'base_order_id' (РµСЃР»Рё split_child_orders=True).
     """
     
     if start_date is None:
         start_date = dt.date.today()
-    warnings: list[str] = []   # ← будем собирать предупреждения для UI/логов
+    warnings: list[str] = []   # в†ђ Р±СѓРґРµРј СЃРѕР±РёСЂР°С‚СЊ РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёСЏ РґР»СЏ UI/Р»РѕРіРѕРІ
 
-    # --- map item -> workshop (from BOM); используется для складов и маршрутизации
+    # --- map item -> workshop (from BOM); РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ СЃРєР»Р°РґРѕРІ Рё РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРё
     item_workshop = {}
     if "workshop" in bom.columns:
         try:
@@ -1263,9 +946,11 @@ def greedy_schedule(
     else:
         item_workshop = {}
 
-    # Если есть склад, сначала гасим спрос по родителю до разворота BOM,
-    # чтобы не плодить дочерние заказы на объёмы, уже закрытые готовой продукцией.
-    if expand and stock_map:
+    use_level_demand = True
+
+    # Р•СЃР»Рё РµСЃС‚СЊ СЃРєР»Р°Рґ, СЃРЅР°С‡Р°Р»Р° РіР°СЃРёРј СЃРїСЂРѕСЃ РїРѕ СЂРѕРґРёС‚РµР»СЋ РґРѕ СЂР°Р·РІРѕСЂРѕС‚Р° BOM,
+    # С‡С‚РѕР±С‹ РЅРµ РїР»РѕРґРёС‚СЊ РґРѕС‡РµСЂРЅРёРµ Р·Р°РєР°Р·С‹ РЅР° РѕР±СЉС‘РјС‹, СѓР¶Рµ Р·Р°РєСЂС‹С‚С‹Рµ РіРѕС‚РѕРІРѕР№ РїСЂРѕРґСѓРєС†РёРµР№.
+    if expand and stock_map and not use_level_demand:
         smap_prefilter = {}
         for k, v in stock_map.items():
             if isinstance(k, tuple) and len(k) == 2:
@@ -1303,9 +988,9 @@ def greedy_schedule(
                 row["qty"] = int(needed)
                 pre_rows.append(row)
         demand = pd.DataFrame(pre_rows, columns=demand_cols) if pre_rows else demand.iloc[0:0]
-        stock_map = smap_prefilter  # остаток пойдёт ниже (на дочерние уровни)
+        stock_map = smap_prefilter  # РѕСЃС‚Р°С‚РѕРє РїРѕР№РґС‘С‚ РЅРёР¶Рµ (РЅР° РґРѕС‡РµСЂРЅРёРµ СѓСЂРѕРІРЅРё)
 
-    # Карта родителя по BOM (нужна, чтобы гасить ветки, если родитель закрыт складом)
+    # РљР°СЂС‚Р° СЂРѕРґРёС‚РµР»СЏ РїРѕ BOM (РЅСѓР¶РЅР°, С‡С‚РѕР±С‹ РіР°СЃРёС‚СЊ РІРµС‚РєРё, РµСЃР»Рё СЂРѕРґРёС‚РµР»СЊ Р·Р°РєСЂС‹С‚ СЃРєР»Р°РґРѕРј)
     parent_lookup: dict[str, set[str]] = {}
     if "root_item_id" in bom.columns:
         try:
@@ -1318,12 +1003,23 @@ def greedy_schedule(
         except Exception:
             parent_lookup = {}
 
-    # === 0) Подготовка входных данных и иерархии ===
+    # === 0) РџРѕРґРіРѕС‚РѕРІРєР° РІС…РѕРґРЅС‹С… РґР°РЅРЅС‹С… Рё РёРµСЂР°СЂС…РёРё ===
     if expand:
-        demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=include_parents)
+        demand = expand_demand_with_hierarchy(
+            demand,
+            bom,
+            split_child_orders=split_child_orders,
+            include_parents=include_parents,
+            reserved_order_ids=reserved_order_ids,
+            fixed_order_qty=fixed_order_qty,
+            stock_map=stock_map,
+            item_workshop=item_workshop,
+        )
+        if use_level_demand:
+            stock_map = None
     print("[GREEDY DEBUG] expanded_demand rows:", len(demand))
     # === STOCK CONSUMPTION (apply to all levels FG/PARENT/CHILD with proportional scaling) ===
-    if stock_map:
+    if stock_map and not use_level_demand:
         # normalize stock map keys to tuple (item, workshop) or str item for legacy
         smap = {}
         for k, v in stock_map.items():
@@ -1332,7 +1028,7 @@ def greedy_schedule(
             else:
                 smap[str(k)] = float(v or 0.0)
 
-        # scale_product: сколько долей исходного qty реально идёт в производство для каждого item (per base_order_id)
+        # scale_product: СЃРєРѕР»СЊРєРѕ РґРѕР»РµР№ РёСЃС…РѕРґРЅРѕРіРѕ qty СЂРµР°Р»СЊРЅРѕ РёРґС‘С‚ РІ РїСЂРѕРёР·РІРѕРґСЃС‚РІРѕ РґР»СЏ РєР°Р¶РґРѕРіРѕ item (per base_order_id)
         scale_product = defaultdict(dict)  # base_oid -> {item_id -> fraction_of_original}
         adjusted_map: dict[tuple[object, ...], dict] = {}
         demand = demand.sort_values(["priority","depth","item_id"], kind="stable").reset_index(drop=True)
@@ -1347,7 +1043,7 @@ def greedy_schedule(
             par = str(getattr(r, "parent_item_id", "") or "")
             if not par:
                 parents_set = parent_lookup.get(item, set())
-                # если несколько родителей, берём max долю выпуска среди них (агрегируем ниже)
+                # РµСЃР»Рё РЅРµСЃРєРѕР»СЊРєРѕ СЂРѕРґРёС‚РµР»РµР№, Р±РµСЂС‘Рј max РґРѕР»СЋ РІС‹РїСѓСЃРєР° СЃСЂРµРґРё РЅРёС… (Р°РіСЂРµРіРёСЂСѓРµРј РЅРёР¶Рµ)
                 parent_scale = max((scale_product[base_oid].get(p, 1.0) for p in parents_set), default=1.0)
             else:
                 parent_scale = scale_product[base_oid].get(par, 1.0) if par else 1.0
@@ -1385,8 +1081,8 @@ def greedy_schedule(
                             break
 
             produced = max(needed, 0.0)
-            # produced сейчас = остаток после списания склада; считаем долю от исходного q_orig,
-            # чтобы потомки учитывали, что родителя частично закрыли складом/получениями.
+            # produced СЃРµР№С‡Р°СЃ = РѕСЃС‚Р°С‚РѕРє РїРѕСЃР»Рµ СЃРїРёСЃР°РЅРёСЏ СЃРєР»Р°РґР°; СЃС‡РёС‚Р°РµРј РґРѕР»СЋ РѕС‚ РёСЃС…РѕРґРЅРѕРіРѕ q_orig,
+            # С‡С‚РѕР±С‹ РїРѕС‚РѕРјРєРё СѓС‡РёС‚С‹РІР°Р»Рё, С‡С‚Рѕ СЂРѕРґРёС‚РµР»СЏ С‡Р°СЃС‚РёС‡РЅРѕ Р·Р°РєСЂС‹Р»Рё СЃРєР»Р°РґРѕРј/РїРѕР»СѓС‡РµРЅРёСЏРјРё.
             base_qty = q_orig if np.isfinite(q_orig) else 0.0
             frac = produced / base_qty if base_qty > 1e-9 else 0.0
             frac = max(0.0, min(1.0, frac))
@@ -1427,11 +1123,11 @@ def greedy_schedule(
         demand = pd.DataFrame(adjusted) if adjusted else demand.iloc[0:0]
 
     if len(demand) == 0:
-        raise ValueError("Greedy: expanded_demand is empty — нет маршрутов/BOM или qty_per_parent/идентификаторы не сошлись.")
+        raise ValueError("Greedy: expanded_demand is empty вЂ” РЅРµС‚ РјР°СЂС€СЂСѓС‚РѕРІ/BOM РёР»Рё qty_per_parent/РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂС‹ РЅРµ СЃРѕС€Р»РёСЃСЊ.")
     if "role" not in demand.columns:
         demand["role"] = "FG"
 
-    # Карты предков/потомков для дерева
+    # РљР°СЂС‚С‹ РїСЂРµРґРєРѕРІ/РїРѕС‚РѕРјРєРѕРІ РґР»СЏ РґРµСЂРµРІР°
     parent_map = {}
     children_map: dict[str, set[str]] = {}
     if "root_item_id" in bom.columns:
@@ -1442,10 +1138,10 @@ def greedy_schedule(
             if par and par != item:
                 children_map.setdefault(par, set()).add(item)
     else:
-        # без иерархии — все без родителей
+        # Р±РµР· РёРµСЂР°СЂС…РёРё вЂ” РІСЃРµ Р±РµР· СЂРѕРґРёС‚РµР»РµР№
         parent_map = {}
 
-    # === 1) Емкость машин и перегрузка ===
+    # === 1) Р•РјРєРѕСЃС‚СЊ РјР°С€РёРЅ Рё РїРµСЂРµРіСЂСѓР·РєР° ===
     base_cap = machines.groupby("machine_id", as_index=True)["capacity_per_day"].max().to_dict()
     per_machine_over = {}
     if "overload_pct" in machines.columns:
@@ -1467,7 +1163,7 @@ def greedy_schedule(
         ov = max(0.0, ov)
         return float(cap) * (1.0 + ov)
 
-    # === 2) Маршруты: item_id -> [(step, machine_id, t_per_unit, setup_once)], отсортированы по step ===
+    # === 2) РњР°СЂС€СЂСѓС‚С‹: item_id -> [(step, machine_id, t_per_unit, setup_once)], РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅС‹ РїРѕ step ===
     route = defaultdict(list)
     has_setup = "setup_minutes" in bom.columns
     for _, r in bom.iterrows():
@@ -1480,14 +1176,14 @@ def greedy_schedule(
     for k in route.keys():
         route[k].sort(key=lambda x: x[0])
 
-    # Проверим совпадение machine_id между BOM и machines
+    # РџСЂРѕРІРµСЂРёРј СЃРѕРІРїР°РґРµРЅРёРµ machine_id РјРµР¶РґСѓ BOM Рё machines
     route_mids = sorted({m for steps in route.values() for (_, m, _, _) in steps})
     base_cap = machines.groupby("machine_id")["capacity_per_day"].max()
     missing = [m for m in route_mids if m not in base_cap.index]
     print(f"[GREEDY DEBUG] route_machines={len(route_mids)} missing_in_machines={len(missing)}")
     if missing[:10]: print("[GREEDY DEBUG] missing sample:", missing[:10])
     
-    # Проверим кап на сегодня по первым 5 машинам из маршрутов
+    # РџСЂРѕРІРµСЂРёРј РєР°Рї РЅР° СЃРµРіРѕРґРЅСЏ РїРѕ РїРµСЂРІС‹Рј 5 РјР°С€РёРЅР°Рј РёР· РјР°СЂС€СЂСѓС‚РѕРІ
     sd = start_date
     for mid in route_mids[:5]:
         try:
@@ -1497,27 +1193,27 @@ def greedy_schedule(
         print(f"[GREEDY DEBUG] cap[{mid}] on {sd} = {c}")
 
 
-    # === 3) Аккумуляторы ===
+    # === 3) РђРєРєСѓРјСѓР»СЏС‚РѕСЂС‹ ===
     used = defaultdict(lambda: defaultdict(float))  # machine_id -> date -> minutes_used
     rows = []
 
-    # В JIT режиме нам важно знать старт/финиш каждого (base_order_id, item_id)
+    # Р’ JIT СЂРµР¶РёРјРµ РЅР°Рј РІР°Р¶РЅРѕ Р·РЅР°С‚СЊ СЃС‚Р°СЂС‚/С„РёРЅРёС€ РєР°Р¶РґРѕРіРѕ (base_order_id, item_id)
     item_start: dict[tuple[str, str], dt.date] = {}
     item_finish: dict[tuple[str, str], dt.date] = {}
 
-    # Утилиты размещения одного ШАГА
+    # РЈС‚РёР»РёС‚С‹ СЂР°Р·РјРµС‰РµРЅРёСЏ РѕРґРЅРѕРіРѕ РЁРђР“Рђ
     def alloc_forward_step(machine_id: str, minutes_total: float, day_from: dt.date, latest_allowed: dt.date | None) -> tuple[dt.date, dt.date]:
-        """Размещает minutes_total вперёд от day_from. Если latest_allowed задан, не допускаем day > latest_allowed."""
+        """Р Р°Р·РјРµС‰Р°РµС‚ minutes_total РІРїРµСЂС‘Рґ РѕС‚ day_from. Р•СЃР»Рё latest_allowed Р·Р°РґР°РЅ, РЅРµ РґРѕРїСѓСЃРєР°РµРј day > latest_allowed."""
         remaining = float(minutes_total)
-        day = max(day_from, start_date)  # не раньше сегодняшнего дня
+        day = max(day_from, start_date)  # РЅРµ СЂР°РЅСЊС€Рµ СЃРµРіРѕРґРЅСЏС€РЅРµРіРѕ РґРЅСЏ
         first_day = None
         guard = 0
         while remaining > 1e-6:
             guard += 1
             if guard > guard_limit_days:
-                raise RuntimeError("Превышен лимит дней при планировании вперёд (guard_limit_days).")
+                raise RuntimeError("РџСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ РґРЅРµР№ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РІРїРµСЂС‘Рґ (guard_limit_days).")
             if latest_allowed is not None and day > latest_allowed:
-                raise RuntimeError("Не удалось уложиться в заданный дедлайн при планировании вперёд.")
+                raise RuntimeError("РќРµ СѓРґР°Р»РѕСЃСЊ СѓР»РѕР¶РёС‚СЊСЃСЏ РІ Р·Р°РґР°РЅРЅС‹Р№ РґРµРґР»Р°Р№РЅ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РІРїРµСЂС‘Рґ.")
             cap = effective_cap(machine_id, day)
             free = max(0.0, cap - used[machine_id][day])
             if free > 1e-6:
@@ -1528,10 +1224,10 @@ def greedy_schedule(
                     first_day = day
             if remaining > 1e-6:
                 day = day + dt.timedelta(days=1)
-        return first_day or day_from, day  # start_day, finish_day (последний день, где добили)
+        return first_day or day_from, day  # start_day, finish_day (РїРѕСЃР»РµРґРЅРёР№ РґРµРЅСЊ, РіРґРµ РґРѕР±РёР»Рё)
 
     def alloc_backward_step(machine_id: str, minutes_total: float, deadline: dt.date, earliest_allowed: dt.date) -> tuple[dt.date, dt.date]:
-        """Размещает minutes_total НАЗАД, заканчивая в deadline (<=deadline), но не раньше earliest_allowed."""
+        """Р Р°Р·РјРµС‰Р°РµС‚ minutes_total РќРђР—РђР”, Р·Р°РєР°РЅС‡РёРІР°СЏ РІ deadline (<=deadline), РЅРѕ РЅРµ СЂР°РЅСЊС€Рµ earliest_allowed."""
         remaining = float(minutes_total)
         day = deadline
         last_day = None
@@ -1539,9 +1235,9 @@ def greedy_schedule(
         while remaining > 1e-6:
             guard += 1
             if guard > guard_limit_days:
-                raise RuntimeError("Превышен лимит дней при планировании вперёд (guard_limit_days).")
+                raise RuntimeError("РџСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ РґРЅРµР№ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РІРїРµСЂС‘Рґ (guard_limit_days).")
             if day < earliest_allowed:
-                raise RuntimeError("Не удалось уложиться в окно при планировании назад.")
+                raise RuntimeError("РќРµ СѓРґР°Р»РѕСЃСЊ СѓР»РѕР¶РёС‚СЊСЃСЏ РІ РѕРєРЅРѕ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РЅР°Р·Р°Рґ.")
             cap = effective_cap(machine_id, day)
             free = max(0.0, cap - used[machine_id][day])
             if free > 1e-6:
@@ -1552,39 +1248,39 @@ def greedy_schedule(
                     last_day = day
             if remaining > 1e-6:
                 day = day - dt.timedelta(days=1)
-        # вернём (start_day, finish_day) для шага
-        # start_day = день начала (самый ранний задействованный), это day+1 после последнего шага цикла,
-        # но проще отследить: после цикла 'day' уже на 1 раньше фактического стартового дня
+        # РІРµСЂРЅС‘Рј (start_day, finish_day) РґР»СЏ С€Р°РіР°
+        # start_day = РґРµРЅСЊ РЅР°С‡Р°Р»Р° (СЃР°РјС‹Р№ СЂР°РЅРЅРёР№ Р·Р°РґРµР№СЃС‚РІРѕРІР°РЅРЅС‹Р№), СЌС‚Рѕ day+1 РїРѕСЃР»Рµ РїРѕСЃР»РµРґРЅРµРіРѕ С€Р°РіР° С†РёРєР»Р°,
+        # РЅРѕ РїСЂРѕС‰Рµ РѕС‚СЃР»РµРґРёС‚СЊ: РїРѕСЃР»Рµ С†РёРєР»Р° 'day' СѓР¶Рµ РЅР° 1 СЂР°РЅСЊС€Рµ С„Р°РєС‚РёС‡РµСЃРєРѕРіРѕ СЃС‚Р°СЂС‚РѕРІРѕРіРѕ РґРЅСЏ
         start_day = day + dt.timedelta(days=1)
         finish_day = last_day or deadline
         return start_day, finish_day
 
-    # Размещение одного ИЗДЕЛИЯ по всем его шагам
+    # Р Р°Р·РјРµС‰РµРЅРёРµ РѕРґРЅРѕРіРѕ РР—Р”Р•Р›РРЇ РїРѕ РІСЃРµРј РµРіРѕ С€Р°РіР°Рј
     def schedule_item_forward(base_oid: str, oid: str, item: str, qty: int, earliest: dt.date, latest: dt.date | None, due: dt.date):
-        """ASAP: шагаем вперёд, optionally удерживая finish <= latest."""
+        """ASAP: С€Р°РіР°РµРј РІРїРµСЂС‘Рґ, optionally СѓРґРµСЂР¶РёРІР°СЏ finish <= latest."""
         steps = route.get(item) or [(1, "UNKNOWN", 0.0, 0.0)]
         first_any = None
         cur_day = earliest
         for step, machine_id, tpu, setup_once in steps:
             total = qty * float(tpu) + float(setup_once)
             st, fin = alloc_forward_step(machine_id, total, cur_day, latest_allowed=latest)
-            # Запишем по дням (там уже добавились minutes в used) — добавим строки
-            # Чтобы не разбирать по минутам в пределах дня, мы уже пишем по факту в while-цикле выше;
-            # здесь фиксируем только границы для зависимостей:
-            cur_day = fin  # следующий шаг не раньше финиша текущего
+            # Р—Р°РїРёС€РµРј РїРѕ РґРЅСЏРј (С‚Р°Рј СѓР¶Рµ РґРѕР±Р°РІРёР»РёСЃСЊ minutes РІ used) вЂ” РґРѕР±Р°РІРёРј СЃС‚СЂРѕРєРё
+            # Р§С‚РѕР±С‹ РЅРµ СЂР°Р·Р±РёСЂР°С‚СЊ РїРѕ РјРёРЅСѓС‚Р°Рј РІ РїСЂРµРґРµР»Р°С… РґРЅСЏ, РјС‹ СѓР¶Рµ РїРёС€РµРј РїРѕ С„Р°РєС‚Сѓ РІ while-С†РёРєР»Рµ РІС‹С€Рµ;
+            # Р·РґРµСЃСЊ С„РёРєСЃРёСЂСѓРµРј С‚РѕР»СЊРєРѕ РіСЂР°РЅРёС†С‹ РґР»СЏ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№:
+            cur_day = fin  # СЃР»РµРґСѓСЋС‰РёР№ С€Р°Рі РЅРµ СЂР°РЅСЊС€Рµ С„РёРЅРёС€Р° С‚РµРєСѓС‰РµРіРѕ
             first_any = first_any or st
-            # (Строки расписания уже собирались в alloc_* через used; добавим их здесь агрегированно по дням)
-        # Для корректного экспорта и lag — нам нужны реальные строки по дням.
-        # Мы уже использовали used[...] для резерва, но строчек не добавили. Добавим их сейчас постфактум:
-        # (пройдём по диапазону дат и вычленим вклад этого item/oid — упростим: добавим строки во время распределения)
-        # => Поэтому переносим формирование строк внутрь alloc_* (см. ниже обновлённый вариант).
+            # (РЎС‚СЂРѕРєРё СЂР°СЃРїРёСЃР°РЅРёСЏ СѓР¶Рµ СЃРѕР±РёСЂР°Р»РёСЃСЊ РІ alloc_* С‡РµСЂРµР· used; РґРѕР±Р°РІРёРј РёС… Р·РґРµСЃСЊ Р°РіСЂРµРіРёСЂРѕРІР°РЅРЅРѕ РїРѕ РґРЅСЏРј)
+        # Р”Р»СЏ РєРѕСЂСЂРµРєС‚РЅРѕРіРѕ СЌРєСЃРїРѕСЂС‚Р° Рё lag вЂ” РЅР°Рј РЅСѓР¶РЅС‹ СЂРµР°Р»СЊРЅС‹Рµ СЃС‚СЂРѕРєРё РїРѕ РґРЅСЏРј.
+        # РњС‹ СѓР¶Рµ РёСЃРїРѕР»СЊР·РѕРІР°Р»Рё used[...] РґР»СЏ СЂРµР·РµСЂРІР°, РЅРѕ СЃС‚СЂРѕС‡РµРє РЅРµ РґРѕР±Р°РІРёР»Рё. Р”РѕР±Р°РІРёРј РёС… СЃРµР№С‡Р°СЃ РїРѕСЃС‚С„Р°РєС‚СѓРј:
+        # (РїСЂРѕР№РґС‘Рј РїРѕ РґРёР°РїР°Р·РѕРЅСѓ РґР°С‚ Рё РІС‹С‡Р»РµРЅРёРј РІРєР»Р°Рґ СЌС‚РѕРіРѕ item/oid вЂ” СѓРїСЂРѕСЃС‚РёРј: РґРѕР±Р°РІРёРј СЃС‚СЂРѕРєРё РІРѕ РІСЂРµРјСЏ СЂР°СЃРїСЂРµРґРµР»РµРЅРёСЏ)
+        # => РџРѕСЌС‚РѕРјСѓ РїРµСЂРµРЅРѕСЃРёРј С„РѕСЂРјРёСЂРѕРІР°РЅРёРµ СЃС‚СЂРѕРє РІРЅСѓС‚СЂСЊ alloc_* (СЃРј. РЅРёР¶Рµ РѕР±РЅРѕРІР»С‘РЅРЅС‹Р№ РІР°СЂРёР°РЅС‚).
         item_start[(base_oid, item)] = first_any or earliest
         item_finish[(base_oid, item)] = cur_day
         return item_start[(base_oid, item)], item_finish[(base_oid, item)]
 
-    # Чтобы формировать строки расписания сразу, сделаем прокси вокруг alloc_*,
-    # который принимает "контекст строки" и при каждом 'take' добавляет row.
-    # ---------- Аллокаторы (вперёд / назад) ----------
+    # Р§С‚РѕР±С‹ С„РѕСЂРјРёСЂРѕРІР°С‚СЊ СЃС‚СЂРѕРєРё СЂР°СЃРїРёСЃР°РЅРёСЏ СЃСЂР°Р·Сѓ, СЃРґРµР»Р°РµРј РїСЂРѕРєСЃРё РІРѕРєСЂСѓРі alloc_*,
+    # РєРѕС‚РѕСЂС‹Р№ РїСЂРёРЅРёРјР°РµС‚ "РєРѕРЅС‚РµРєСЃС‚ СЃС‚СЂРѕРєРё" Рё РїСЂРё РєР°Р¶РґРѕРј 'take' РґРѕР±Р°РІР»СЏРµС‚ row.
+    # ---------- РђР»Р»РѕРєР°С‚РѕСЂС‹ (РІРїРµСЂС‘Рґ / РЅР°Р·Р°Рґ) ----------
     def alloc_forward_step_rows(machine_id, minutes_total, day_from, latest_allowed, row_ctx):
         # robust numeric
         try:
@@ -1601,9 +1297,9 @@ def greedy_schedule(
         while remaining > 1e-6:
             guard += 1
             if guard > guard_limit_days:
-                raise RuntimeError("Превышен лимит дней при планировании вперёд (guard_limit_days).")
+                raise RuntimeError("РџСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ РґРЅРµР№ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РІРїРµСЂС‘Рґ (guard_limit_days).")
             if latest_allowed is not None and day > latest_allowed:
-                raise RuntimeError("Не удалось уложиться в дедлайн при планировании вперёд.")
+                raise RuntimeError("РќРµ СѓРґР°Р»РѕСЃСЊ СѓР»РѕР¶РёС‚СЊСЃСЏ РІ РґРµРґР»Р°Р№РЅ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РІРїРµСЂС‘Рґ.")
 
             cap = effective_cap(machine_id, day)
             free = max(0.0, cap - used[machine_id][day])
@@ -1630,6 +1326,23 @@ def greedy_schedule(
             remaining = 0.0
         if not np.isfinite(remaining) or remaining < 0:
             remaining = 0.0
+        if remaining <= 1e-6:
+            return deadline, deadline
+
+        # Validate feasibility in [earliest_allowed, deadline] before mutating `used`.
+        if deadline < earliest_allowed:
+            raise RuntimeError("Не удалось уложиться в окно при планировании назад.")
+        span_days = (deadline - earliest_allowed).days + 1
+        if span_days > guard_limit_days:
+            raise RuntimeError("Превышен лимит дней при планировании назад (guard_limit_days).")
+        free_total = 0.0
+        probe_day = deadline
+        while probe_day >= earliest_allowed:
+            cap = effective_cap(machine_id, probe_day)
+            free_total += max(0.0, cap - used[machine_id][probe_day])
+            probe_day = probe_day - dt.timedelta(days=1)
+        if free_total + 1e-6 < remaining:
+            raise RuntimeError("Не удалось уложиться в окно при планировании назад.")
 
         day = deadline
         last_day = None
@@ -1638,7 +1351,9 @@ def greedy_schedule(
         while remaining > 1e-6:
             guard += 1
             if guard > guard_limit_days:
-                raise RuntimeError("Превышен лимит дней при планировании назад (guard_limit_days).")
+                raise RuntimeError("РџСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ РґРЅРµР№ РїСЂРё РїР»Р°РЅРёСЂРѕРІР°РЅРёРё РЅР°Р·Р°Рґ (guard_limit_days).")
+            if day < earliest_allowed:
+                raise RuntimeError("Не удалось уложиться в окно при планировании назад.")
 
             cap = effective_cap(machine_id, day)
             free = max(0.0, cap - used[machine_id][day])
@@ -1654,19 +1369,19 @@ def greedy_schedule(
             if remaining > 1e-6:
                 day = day - dt.timedelta(days=1)
 
-        start_day = day + dt.timedelta(days=1)
+        start_day = day
         finish_day = last_day or deadline
         return start_day, finish_day
 
 
     def schedule_item_backward(base_oid: str, oid: str, item: str, qty: int,
                                deadline: dt.date, earliest_allowed: dt.date, due: dt.date):
-        """JIT-хелпер: один item назад к deadline (<=deadline), без старта раньше earliest_allowed."""
+        """JIT-С…РµР»РїРµСЂ: РѕРґРёРЅ item РЅР°Р·Р°Рґ Рє deadline (<=deadline), Р±РµР· СЃС‚Р°СЂС‚Р° СЂР°РЅСЊС€Рµ earliest_allowed."""
         steps = route.get(item) or [(1, "UNKNOWN", 0.0, 0.0)]
         cur_deadline = deadline
         earliest_seen = None
 
-        # ровно и безопасно считаем минуты по шагам
+        # СЂРѕРІРЅРѕ Рё Р±РµР·РѕРїР°СЃРЅРѕ СЃС‡РёС‚Р°РµРј РјРёРЅСѓС‚С‹ РїРѕ С€Р°РіР°Рј
         def _num(x): 
             try:
                 x = float(x)
@@ -1688,7 +1403,7 @@ def greedy_schedule(
                 "due_date": due, "workshop": item_workshop.get(item, "")}
             st, fin = alloc_backward_step_rows(machine_id, total, cur_deadline, earliest_allowed, row_ctx)
             earliest_seen = st if earliest_seen is None else min(earliest_seen, st)
-            # предыдущий по маршруту шаг должен финишировать не позже старта текущего - 1 день
+            # РїСЂРµРґС‹РґСѓС‰РёР№ РїРѕ РјР°СЂС€СЂСѓС‚Сѓ С€Р°Рі РґРѕР»Р¶РµРЅ С„РёРЅРёС€РёСЂРѕРІР°С‚СЊ РЅРµ РїРѕР·Р¶Рµ СЃС‚Р°СЂС‚Р° С‚РµРєСѓС‰РµРіРѕ - 1 РґРµРЅСЊ
             cur_deadline = st - dt.timedelta(days=1)
 
         item_start[(base_oid, item)] = earliest_seen or earliest_allowed
@@ -1696,9 +1411,9 @@ def greedy_schedule(
         return item_start[(base_oid, item)], item_finish[(base_oid, item)]
 
 
-    # === 4) Основная логика: ASAP или JIT ===
+    # === 4) РћСЃРЅРѕРІРЅР°СЏ Р»РѕРіРёРєР°: ASAP РёР»Рё JIT ===
     if not align_roots_to_due:
-        # ---------- ASAP вперёд ----------
+        # ---------- ASAP РІРїРµСЂС‘Рґ ----------
         sort_cols = [c for c in ["priority", "base_order_id", "item_id"] if c in demand.columns]
         demand_sorted = demand.sort_values(sort_cols, kind="stable").reset_index(drop=True)
 
@@ -1709,7 +1424,7 @@ def greedy_schedule(
             qty = int(job["qty"]) if not pd.isna(job["qty"]) else 0
             due = job["due_date"]
 
-            # старт не раньше финиша родителя
+            # СЃС‚Р°СЂС‚ РЅРµ СЂР°РЅСЊС€Рµ С„РёРЅРёС€Р° СЂРѕРґРёС‚РµР»СЏ
             earliest_day = start_date
             par = str(parent_map.get(item, "") or "")
             if par:
@@ -1719,7 +1434,7 @@ def greedy_schedule(
 
             steps = route.get(item) or [(1, "UNKNOWN", 0.0, 0.0)]
 
-            # аккуратно считаем суммарные минуты
+            # Р°РєРєСѓСЂР°С‚РЅРѕ СЃС‡РёС‚Р°РµРј СЃСѓРјРјР°СЂРЅС‹Рµ РјРёРЅСѓС‚С‹
             def _num(x):
                 try:
                     x = float(x)
@@ -1732,7 +1447,7 @@ def greedy_schedule(
                 total_item_minutes += qty * _num(tpu) + _num(setup)
 
             if total_item_minutes <= 1e-9:
-                # Пустой маршрут — плейсхолдер
+                # РџСѓСЃС‚РѕР№ РјР°СЂС€СЂСѓС‚ вЂ” РїР»РµР№СЃС…РѕР»РґРµСЂ
                 rows.append({
                     "base_order_id": base_oid, "order_id": oid, "item_id": item,
                     "step": 1, "machine_id": "UNKNOWN", "date": earliest_day,
@@ -1740,12 +1455,12 @@ def greedy_schedule(
                 })
                 item_start[(base_oid, item)] = earliest_day
                 item_finish[(base_oid, item)] = earliest_day
-                warnings.append(f"[ROUTE] {base_oid}/{item}: пустой маршрут (0 мин). Плейсхолдер {earliest_day}.")
+                warnings.append(f"[ROUTE] {base_oid}/{item}: РїСѓСЃС‚РѕР№ РјР°СЂС€СЂСѓС‚ (0 РјРёРЅ). РџР»РµР№СЃС…РѕР»РґРµСЂ {earliest_day}.")
                 continue
 
-            # собственно планирование вперёд
+            # СЃРѕР±СЃС‚РІРµРЅРЅРѕ РїР»Р°РЅРёСЂРѕРІР°РЅРёРµ РІРїРµСЂС‘Рґ
             first_any = None
-            cur = earliest_day  # <--- пропущенная переменная была
+            cur = earliest_day  # <--- РїСЂРѕРїСѓС‰РµРЅРЅР°СЏ РїРµСЂРµРјРµРЅРЅР°СЏ Р±С‹Р»Р°
             for step, machine_id, tpu, setup_once in steps:
                 tpu = _num(tpu); setup_once = _num(setup_once)
                 total = qty * tpu + setup_once
@@ -1762,24 +1477,24 @@ def greedy_schedule(
             item_finish[(base_oid, item)] = cur
 
     else:
-        # ---------- JIT: корневые (FG) упираются в due_date, дети назад до старта родителя ----------
-        today = start_date  # не стартуем раньше today
+        # ---------- JIT: РєРѕСЂРЅРµРІС‹Рµ (FG) СѓРїРёСЂР°СЋС‚СЃСЏ РІ due_date, РґРµС‚Рё РЅР°Р·Р°Рґ РґРѕ СЃС‚Р°СЂС‚Р° СЂРѕРґРёС‚РµР»СЏ ----------
+        today = start_date  # РЅРµ СЃС‚Р°СЂС‚СѓРµРј СЂР°РЅСЊС€Рµ today
 
-        # группируем по base_order_id (если его нет — по order_id)
+        # РіСЂСѓРїРїРёСЂСѓРµРј РїРѕ base_order_id (РµСЃР»Рё РµРіРѕ РЅРµС‚ вЂ” РїРѕ order_id)
         grp_cols = ["base_order_id"] if "base_order_id" in demand.columns else ["order_id"]
         for base_oid, df_ord in demand.groupby(grp_cols):
             base_oid = str(base_oid if isinstance(base_oid, str) else base_oid[0])
 
-            # корни по role='FG', иначе — у кого нет родителя
+            # РєРѕСЂРЅРё РїРѕ role='FG', РёРЅР°С‡Рµ вЂ” Сѓ РєРѕРіРѕ РЅРµС‚ СЂРѕРґРёС‚РµР»СЏ
             roots = df_ord[df_ord["role"] == "FG"]["item_id"].astype(str).unique().tolist()
             if not roots:
                 roots = [it for it in df_ord["item_id"].astype(str).unique().tolist() if not parent_map.get(it, "")]
                 if not roots and len(df_ord):
                     roots = [str(df_ord["item_id"].astype(str).iloc[0])]
 
-            # планировать каждый корень по КАЖДОМУ его due в этой группе
+            # РїР»Р°РЅРёСЂРѕРІР°С‚СЊ РєР°Р¶РґС‹Р№ РєРѕСЂРµРЅСЊ РїРѕ РљРђР–Р”РћРњРЈ РµРіРѕ due РІ СЌС‚РѕР№ РіСЂСѓРїРїРµ
             for root in roots:
-                # все due для root в этой группе
+                # РІСЃРµ due РґР»СЏ root РІ СЌС‚РѕР№ РіСЂСѓРїРїРµ
                 cand_root = df_ord[df_ord["item_id"].astype(str) == root].copy()
                 if cand_root.empty:
                     continue
@@ -1788,19 +1503,17 @@ def greedy_schedule(
                     deadline = due_ts.date()
 
                     def plan_down(item_id: str, deadline: dt.date):
-                        # выбрать строку спроса для item_id с due==deadline (или ближайшую)
+                        # РІС‹Р±СЂР°С‚СЊ СЃС‚СЂРѕРєРё СЃРїСЂРѕСЃР° РґР»СЏ item_id (РІСЃРµ, РїРѕ Р±Р»РёР¶Р°Р№С€РµР№ Рє РґРµРґР»Р°Р№РЅСѓ)
                         cc = df_ord[df_ord["item_id"].astype(str) == item_id].copy()
                         if cc.empty:
                             return
                         cc["due_date"] = pd.to_datetime(cc["due_date"])
                         target = pd.to_datetime(deadline)
-                        row = cc.iloc[(cc["due_date"] - target).abs().argsort().iloc[0]]
-                        q = int(row["qty"]) if not pd.isna(row["qty"]) else 0
-                        due_loc = row["due_date"].date()
-                        oid_loc = str(row["order_id"])
+                        cc = cc.assign(_dist=(cc["due_date"] - target).abs()).sort_values(
+                            ["_dist", "due_date", "order_id"], kind="stable"
+                        ).drop(columns=["_dist"])
 
-                        steps_loc = route.get(item_id) or [(1, "UNKNOWN", 0.0, 0.0)]
-                        # суммарные минуты (robust)
+                        # СЃСѓРјРјР°СЂРЅС‹Рµ РјРёРЅСѓС‚С‹ (robust)
                         def _num(x):
                             try:
                                 x = float(x)
@@ -1808,66 +1521,77 @@ def greedy_schedule(
                                 x = 0.0
                             if not np.isfinite(x): x = 0.0
                             return x
-                        total_item_minutes = 0.0
-                        for _, _, tpu_i, setup_i in steps_loc:
-                            total_item_minutes += q * _num(tpu_i) + _num(setup_i)
 
-                        if total_item_minutes <= 1e-9:
-                            # пустой маршрут — плейсхолдер на дедлайн (или today, если в прошлом)
-                            place_day = deadline if deadline >= today else today
-                            rows.append({
-                                "base_order_id": base_oid, "order_id": oid_loc, "item_id": item_id,
-                                "step": 1, "machine_id": "UNKNOWN", "date": place_day,
-                                "minutes": 0.0, "qty": q, "due_date": due_loc,
-                            })
-                            item_start[(base_oid, item_id)] = place_day
-                            item_finish[(base_oid, item_id)] = place_day
-                            # дети — к старту - 1 день
-                            child_deadline = item_start[(base_oid, item_id)] - dt.timedelta(days=1)
-                            for child in sorted(list(children_map.get(item_id, []))):
-                                plan_down(child, deadline=child_deadline)
+                        min_start = None
+                        max_finish = None
+                        for _, row in cc.iterrows():
+                            q = int(row["qty"]) if not pd.isna(row["qty"]) else 0
+                            due_loc = row["due_date"].date()
+                            oid_loc = str(row["order_id"])
+
+                            steps_loc = route.get(item_id) or [(1, "UNKNOWN", 0.0, 0.0)]
+                            total_item_minutes = 0.0
+                            for _, _, tpu_i, setup_i in steps_loc:
+                                total_item_minutes += q * _num(tpu_i) + _num(setup_i)
+
+                            if total_item_minutes <= 1e-9:
+                                place_day = deadline if deadline >= today else today
+                                rows.append({
+                                    "base_order_id": base_oid, "order_id": oid_loc, "item_id": item_id,
+                                    "step": 1, "machine_id": "UNKNOWN", "date": place_day,
+                                    "minutes": 0.0, "qty": q, "due_date": due_loc,
+                                })
+                                start_fact = place_day
+                                finish_fact = place_day
+                            else:
+                                try:
+                                    earliest_seen = None
+                                    cur_deadline = deadline
+
+                                    for step, machine_id, tpu, setup in reversed(steps_loc):
+                                        tpu = _num(tpu); setup = _num(setup)
+                                        total = q * tpu + setup
+                                        ctx = {"base_order_id": base_oid, "order_id": oid_loc,
+                                               "item_id": item_id, "step": step, "qty": q, "due_date": due_loc, "workshop": item_workshop.get(item_id, "")}
+                                        st, fin = alloc_backward_step_rows(machine_id, total, cur_deadline, earliest_allowed=today, row_ctx=ctx)
+                                        earliest_seen = st if earliest_seen is None else min(earliest_seen, st)
+                                        cur_deadline = st - dt.timedelta(days=1)
+
+                                    start_fact = earliest_seen or today
+                                    finish_fact = deadline
+                                except RuntimeError:
+                                    # If JIT window [today, deadline] is infeasible, place overdue item forward from today.
+                                    first_any = None
+                                    cur = today
+                                    for step, machine_id, tpu, setup in steps_loc:
+                                        tpu = _num(tpu); setup = _num(setup)
+                                        total = q * tpu + setup
+                                        ctx = {"base_order_id": base_oid, "order_id": oid_loc,
+                                               "item_id": item_id, "step": step, "qty": q, "due_date": due_loc, "workshop": item_workshop.get(item_id, "")}
+                                        st, fin = alloc_forward_step_rows(machine_id, total, cur, latest_allowed=None, row_ctx=ctx)
+                                        cur = fin
+                                        if first_any is None:
+                                            first_any = st
+                                    start_fact = first_any or today
+                                    finish_fact = cur
+
+                            min_start = start_fact if min_start is None else min(min_start, start_fact)
+                            max_finish = finish_fact if max_finish is None else max(max_finish, finish_fact)
+
+                        if min_start is None:
                             return
+                        item_start[(base_oid, item_id)] = min_start
+                        item_finish[(base_oid, item_id)] = max_finish
 
-                        # полноценное планирование назад
-                        start_idx = len(rows)
-                        earliest_seen = None
-                        cur_deadline = deadline
-
-                        for step, machine_id, tpu, setup in reversed(steps_loc):
-                            tpu = _num(tpu); setup = _num(setup)
-                            total = q * tpu + setup
-                            ctx = {"base_order_id": base_oid, "order_id": oid_loc,
-                                   "item_id": item_id, "step": step, "qty": q, "due_date": due_loc, "workshop": item_workshop.get(item_id, "")}
-                            st, fin = alloc_backward_step_rows(machine_id, total, cur_deadline, earliest_allowed=today, row_ctx=ctx)
-                            earliest_seen = st if earliest_seen is None else min(earliest_seen, st)
-                            cur_deadline = st - dt.timedelta(days=1)
-
-                        start_fact = earliest_seen or today
-                        finish_fact = deadline
-                        item_start[(base_oid, item_id)] = start_fact
-                        item_finish[(base_oid, item_id)] = finish_fact
-
-                        # если ушли «в прошлое» — сдвигаем вперёд
-                        if start_fact < today:
-                            shift = (today - start_fact).days
-                            if shift > 0:
-                                for i in range(start_idx, len(rows)):
-                                    if rows[i]["order_id"] == oid_loc and rows[i]["item_id"] == item_id:
-                                        rows[i]["date"] = rows[i]["date"] + dt.timedelta(days=shift)
-                                item_start[(base_oid, item_id)] = today
-                                item_finish[(base_oid, item_id)] = finish_fact + dt.timedelta(days=shift)
-
-                        # дети — дедлайн = старт родителя - 1 день
                         child_deadline = item_start[(base_oid, item_id)] - dt.timedelta(days=1)
                         for child in sorted(list(children_map.get(item_id, []))):
                             plan_down(child, deadline=child_deadline)
 
-                    # планируем корень на этот конкретный due
+                    # РїР»Р°РЅРёСЂСѓРµРј РєРѕСЂРµРЅСЊ РЅР° СЌС‚РѕС‚ РєРѕРЅРєСЂРµС‚РЅС‹Р№ due
                     plan_down(root, deadline=deadline)
 
 
-
-    # === 5) Финализация расписания ===
+    # === 5) Р¤РёРЅР°Р»РёР·Р°С†РёСЏ СЂР°СЃРїРёСЃР°РЅРёСЏ ===
     sched = pd.DataFrame(rows)
     if sched.empty:
         sched = pd.DataFrame([{
@@ -1886,7 +1610,7 @@ def greedy_schedule(
     sched = sched.sort_values(["date","machine_id","order_id","step"], kind="stable").reset_index(drop=True)
 
     if not rows:
-        print("[GREEDY INFO] Все потребности покрыты запасом — производственные операции не создавались.")
+        print("[GREEDY INFO] Р’СЃРµ РїРѕС‚СЂРµР±РЅРѕСЃС‚Рё РїРѕРєСЂС‹С‚С‹ Р·Р°РїР°СЃРѕРј вЂ” РїСЂРѕРёР·РІРѕРґСЃС‚РІРµРЅРЅС‹Рµ РѕРїРµСЂР°С†РёРё РЅРµ СЃРѕР·РґР°РІР°Р»РёСЃСЊ.")
         sched = pd.DataFrame([{
             "base_order_id": "ALL_FROM_STOCK",
             "order_id": "ALL_FROM_STOCK",
@@ -1912,8 +1636,6 @@ def greedy_schedule(
         pass
 
     return sched
-
-
 
 
 # =========================
@@ -1942,7 +1664,7 @@ from pathlib import Path
 
 def compute_order_items_timeline(sched: pd.DataFrame) -> pd.DataFrame:
     """
-    Таймлайн для каждой пары (order_id, item_id):
+    РўР°Р№РјР»Р°Р№РЅ РґР»СЏ РєР°Р¶РґРѕР№ РїР°СЂС‹ (order_id, item_id):
       start_date, finish_date, duration_days, due_date, finish_lag
     """
     if sched.empty:
@@ -1991,7 +1713,7 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
     _auto_width(ws_gmat)
     if gmat.shape[0] > 0 and gmat.shape[1] > 0:
         chart = BarChart(); chart.type="col"; chart.grouping="stacked"
-        chart.title = "Загрузка (минуты по машинам/дням)"; chart.y_axis.title="Минуты"; chart.x_axis.title="Дата"
+        chart.title = "Р—Р°РіСЂСѓР·РєР° (РјРёРЅСѓС‚С‹ РїРѕ РјР°С€РёРЅР°Рј/РґРЅСЏРј)"; chart.y_axis.title="РњРёРЅСѓС‚С‹"; chart.x_axis.title="Р”Р°С‚Р°"
         data_ref = Reference(ws_gmat, min_col=2, min_row=1, max_col=1+gmat.shape[1], max_row=1+gmat.shape[0])
         cats_ref = Reference(ws_gmat, min_col=2, min_row=1, max_col=1+gmat.shape[1], max_row=1)
         chart.add_data(data_ref, titles_from_data=True, from_rows=True); chart.set_categories(cats_ref)
@@ -2021,11 +1743,11 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
         cap_join = by_day.merge(base_cap, on="machine_id", how="left")
         cap_join["cap_eff"] = cap_join["cap_eff"].fillna(0.0)
     
-    # <-- ВАЖНО: приведение к числам ДO ЛЮБОЙ АРИФМЕТИКИ
+    # <-- Р’РђР–РќРћ: РїСЂРёРІРµРґРµРЅРёРµ Рє С‡РёСЃР»Р°Рј Р”O Р›Р®Р‘РћР™ РђР РР¤РњР•РўРРљР
     cap_join["minutes"] = pd.to_numeric(cap_join["minutes"], errors="coerce").fillna(0.0)
     cap_join["cap_eff"] = pd.to_numeric(cap_join["cap_eff"], errors="coerce").fillna(0.0)
     
-    # Считаем % загрузки один раз, безопасно
+    # РЎС‡РёС‚Р°РµРј % Р·Р°РіСЂСѓР·РєРё РѕРґРёРЅ СЂР°Р·, Р±РµР·РѕРїР°СЃРЅРѕ
     cap_join["util_pct"] = np.where(
         cap_join["cap_eff"] > 0,
         (cap_join["minutes"] / cap_join["cap_eff"] * 100).round(1),
@@ -2128,9 +1850,9 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
             for _, r in b.iterrows():
                 ws_bom.append([r["root_item_id"], r["item_id"], float(r["qty_per_parent"])])
         except Exception:
-            ws_bom.append(["info"]); ws_bom.append(["Не удалось собрать BOM view."])
+            ws_bom.append(["info"]); ws_bom.append(["РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР±СЂР°С‚СЊ BOM view."])
     else:
-        ws_bom.append(["info"]); ws_bom.append(["BOM без иерархии."])
+        ws_bom.append(["info"]); ws_bom.append(["BOM Р±РµР· РёРµСЂР°СЂС…РёРё."])
     _auto_width(ws_bom)
 
     if "base_order_id" in sched.columns:
@@ -2195,7 +1917,6 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
 # =========================
 
 
-
 # =========================
 # Backward-compatible wrapper (tolerates SQLAlchemy Session)
 # =========================
@@ -2203,15 +1924,15 @@ def export_with_charts(sched: pd.DataFrame, out_xlsx: Path, bom: pd.DataFrame | 
 
 def _parse_args():
     p = argparse.ArgumentParser("Greedy planner (so-planner)")
-    p.add_argument("--plan", default="plan of sales.xlsx", help="Путь к plan of sales.xlsx")
-    p.add_argument("--bom", default="BOM.xlsx", help="Путь к BOM.xlsx")
-    p.add_argument("--machines", default="machines.xlsx", help="Путь к machines.xlsx")
-    p.add_argument("--out", default="schedule_out.xlsx", help="Куда сохранить Excel с планом")
-    p.add_argument("--stock", default=None, help="Путь к Excel с остатками (article/item_id + qty)")
-    p.add_argument("--start", default=None, help="Стартовая дата (YYYY-MM-DD)")
-    p.add_argument("--overload-pct", type=float, default=0.0, help="Глобальная перегрузка (0..1 или 0..100%)")
-    p.add_argument("--split-child-orders", action="store_true", help="Каждый article в отдельный order (<base>:<item>)")
-    p.add_argument("--stock", default=None, help="Путь к Excel с остатками (article/item_id + qty)")
+    p.add_argument("--plan", default="plan of sales.xlsx", help="РџСѓС‚СЊ Рє plan of sales.xlsx")
+    p.add_argument("--bom", default="BOM.xlsx", help="РџСѓС‚СЊ Рє BOM.xlsx")
+    p.add_argument("--machines", default="machines.xlsx", help="РџСѓС‚СЊ Рє machines.xlsx")
+    p.add_argument("--out", default="schedule_out.xlsx", help="РљСѓРґР° СЃРѕС…СЂР°РЅРёС‚СЊ Excel СЃ РїР»Р°РЅРѕРј")
+    p.add_argument("--stock", default=None, help="РџСѓС‚СЊ Рє Excel СЃ РѕСЃС‚Р°С‚РєР°РјРё (article/item_id + qty)")
+    p.add_argument("--start", default=None, help="РЎС‚Р°СЂС‚РѕРІР°СЏ РґР°С‚Р° (YYYY-MM-DD)")
+    p.add_argument("--overload-pct", type=float, default=0.0, help="Р“Р»РѕР±Р°Р»СЊРЅР°СЏ РїРµСЂРµРіСЂСѓР·РєР° (0..1 РёР»Рё 0..100%)")
+    p.add_argument("--split-child-orders", action="store_true", help="РљР°Р¶РґС‹Р№ article РІ РѕС‚РґРµР»СЊРЅС‹Р№ order (<base>:<item>)")
+    p.add_argument("--stock", default=None, help="РџСѓС‚СЊ Рє Excel СЃ РѕСЃС‚Р°С‚РєР°РјРё (article/item_id + qty)")
 
     return p.parse_args()
 
@@ -2227,551 +1948,11 @@ def main():
         overload_pct=overload,
         split_child_orders=bool(args.split_child_orders),
     )
-    print(f"Готово: {out}")
-
+    print(f"Р“РѕС‚РѕРІРѕ: {out}")
 
 
 if __name__ == "__main__":
     main()
-
-# --- DB helpers for product_view/netting ---
-def _ensure_netting_tables(db: Session) -> None:
-    """Create minimal tables used by product_view netting if missing (SQLite)."""
-    stmts = [
-        """
-        CREATE TABLE IF NOT EXISTS plan_version (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'draft',
-            horizon_start TEXT,
-            horizon_end TEXT,
-            notes TEXT,
-            origin TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS plan_line (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            plan_version_id INTEGER,
-            item_id TEXT,
-            due_date TEXT,
-            qty INTEGER,
-            priority TEXT,
-            customer TEXT,
-            workshop TEXT,
-            source_tag TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS receipts_plan (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            plan_version_id INTEGER,
-            item_id TEXT,
-            due_date TEXT,
-            qty INTEGER,
-            workshop TEXT,
-            receipt_type TEXT,
-            source_ref TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS stock_snapshot (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            taken_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            notes TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS stock_line (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER,
-            item_id TEXT,
-            workshop TEXT,
-            stock_qty INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS netting_run (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            started_at TEXT,
-            finished_at TEXT,
-            user TEXT,
-            mode TEXT,
-            plan_version_id INTEGER,
-            stock_snapshot_id INTEGER,
-            bom_version_id TEXT,
-            receipts_source_desc TEXT,
-            params TEXT,
-            status TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS netting_order (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            netting_run_id INTEGER,
-            order_id TEXT,
-            item_id TEXT,
-            due_date TEXT,
-            qty INTEGER,
-            priority TEXT,
-            workshop TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS netting_log_row (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            netting_run_id INTEGER,
-            item_id TEXT,
-            workshop TEXT,
-            date TEXT,
-            kind TEXT,
-            opening_exact INTEGER,
-            opening_generic INTEGER,
-            stock_used_exact INTEGER,
-            stock_used_generic INTEGER,
-            receipts_used INTEGER,
-            order_created INTEGER,
-            available_after INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS netting_summary_row (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            netting_run_id INTEGER,
-            item_id TEXT,
-            workshop TEXT,
-            stock_used_total INTEGER,
-            receipts_used_total INTEGER,
-            orders_created_total INTEGER,
-            opening_exact_init INTEGER,
-            opening_generic_init INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS demand_linkage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            netting_run_id INTEGER,
-            parent_item_id TEXT,
-            parent_due_date TEXT,
-            child_item_id TEXT,
-            child_due_date TEXT,
-            qty_per_parent REAL,
-            required_qty REAL
-        )
-        """,
-    ]
-    for sql in stmts:
-        db.execute(text(sql))
-    db.commit()
-
-def _load_receipts_from_db(
-    db: Session,
-    plan_version_id: int,
-    receipts_from: Literal["plan", "firmed", "both"] = "plan",
-) -> pd.DataFrame:
-    parts: list[pd.DataFrame] = []
-
-    if receipts_from in ("plan", "both"):
-        if plan_version_id is None:
-            q = text(
-                """
-                SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-                FROM receipts_plan
-                """
-            )
-            rows = db.execute(q).mappings().all()
-        else:
-            q = text(
-                """
-                SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-                FROM receipts_plan
-                WHERE plan_version_id = :p
-                """
-            )
-            rows = db.execute(q, {"p": plan_version_id}).mappings().all()
-        if rows:
-            parts.append(pd.DataFrame(rows))
-
-    if receipts_from in ("firmed", "both"):
-        try:
-            chk = db.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name='schedule_version'")
-            ).scalar()
-            if chk:
-                qv = text(
-                    """
-                    SELECT sv.id
-                    FROM schedule_version sv
-                    WHERE sv.status = 'firmed'
-                      AND (sv.plan_version_id = :p OR :p IS NULL)
-                    """
-                )
-                sv_ids = [r[0] for r in db.execute(qv, {"p": plan_version_id}).all()]
-                if sv_ids:
-                    qo = text(
-                        f"""
-                        SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-                        FROM schedule_order
-                        WHERE schedule_version_id IN ({','.join(map(str, sv_ids))})
-                        """
-                    )
-                    rows = db.execute(qo).mappings().all()
-                    if rows:
-                        parts.append(pd.DataFrame(rows))
-        except Exception:
-            pass
-
-    if not parts:
-        return pd.DataFrame(columns=["item_id", "due_date", "qty", "workshop"])
-
-    df = pd.concat(parts, ignore_index=True)
-    df["item_id"] = df["item_id"].astype(str).str.strip()
-    df["workshop"] = df["workshop"].astype(str).fillna("")
-    df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
-    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0).astype(int)
-    df = df.groupby(["item_id", "workshop", "due_date"], as_index=False)["qty"].sum()
-    return df
-
-def _load_stock_snapshot(db: Session, snapshot_id: int) -> pd.DataFrame:
-    q = text(
-        """
-        SELECT item_id, COALESCE(workshop,'') AS workshop, stock_qty
-        FROM stock_line
-        WHERE snapshot_id = :sid
-        """
-    )
-    rows = db.execute(q, {"sid": snapshot_id}).mappings().all()
-    if not rows:
-        return pd.DataFrame(columns=["item_id", "workshop", "stock_qty"])
-    df = pd.DataFrame(rows)
-    df["item_id"] = df["item_id"].astype(str).str.strip()
-    df["workshop"] = df["workshop"].astype(str).fillna("")
-    df["stock_qty"] = pd.to_numeric(df["stock_qty"], errors="coerce").fillna(0).astype(int)
-    return df
-
-# --- Optional: load receipts from Excel (ad-hoc) ---
-def _load_receipts_excel(path: str | None) -> pd.DataFrame:
-    if not path:
-        return pd.DataFrame(columns=["item_id", "due_date", "qty", "workshop"])
-    try:
-        df = pd.read_excel(Path(path), sheet_name=0, dtype=object)
-    except Exception:
-        return pd.DataFrame(columns=["item_id", "due_date", "qty", "workshop"])
-
-    def _nc(s: str) -> str:
-        return str(s).strip().lower().replace(" ", "").replace("_", "")
-
-    cols = {_nc(c): c for c in df.columns}
-    item = cols.get("item_id") or cols.get("item") or cols.get("article")
-    due = cols.get("due_date") or cols.get("date")
-    qty = cols.get("qty") or cols.get("quantity")
-    wk = cols.get("workshop") or cols.get("wk")
-    if not item or not due or not qty:
-        return pd.DataFrame(columns=["item_id", "due_date", "qty", "workshop"])
-    out = pd.DataFrame({
-        "item_id": df[item].astype(str).str.strip(),
-        "due_date": pd.to_datetime(df[due], errors="coerce").dt.date,
-        "qty": pd.to_numeric(df[qty], errors="coerce").fillna(0).astype(int),
-        "workshop": df[wk].astype(str).fillna("") if wk else "",
-    })
-    out = out[(out["item_id"] != "") & out["due_date"].notna() & (out["qty"] > 0)].copy()
-    if "workshop" not in out.columns:
-        out["workshop"] = ""
-    return out.groupby(["item_id", "workshop", "due_date"], as_index=False)["qty"].sum()
-
-# --- Product-View from DB end-to-end ---
-def run_product_view_from_db(
-    db: Session,
-    plan_version_id: int | None,
-    stock_snapshot_id: int,
-    receipts_from: str = "plan",
-    receipts_excel_path: str | None = None,
-    bom_path: str | None = None,
-    machines_path: str | None = None,
-    out_xlsx: str | None = None,
-    user: str = "api",
-    plan_name: str | None = None,
-):
-    """
-    Runs Product-View netting using DB tables (plan_line, receipts_plan, stock_line) + greedy schedule.
-    Returns (out_file_path, schedule_df).
-    """
-    import pandas as pd  # ensure no scope issues with global import
-    _ensure_netting_tables(db)
-
-    # Load inputs
-    if (receipts_from or "plan").lower().strip() == "excel" and receipts_excel_path:
-        existing_orders_df = _load_receipts_excel(receipts_excel_path)
-    else:
-        existing_orders_df = _load_receipts_from_db(db, plan_version_id, receipts_from)
-    stock_df = _load_stock_snapshot(db, stock_snapshot_id)
-
-    try:
-        bom = load_bom(Path(bom_path or "BOM.xlsx"))
-    except Exception:
-        bom = pd.DataFrame(columns=["item_id","root_item_id","qty_per_parent","workshop"])
-    try:
-        machines = load_machines(Path(machines_path or "machines.xlsx"))
-    except Exception:
-        machines = pd.DataFrame(columns=["machine_id","capacity_per_day"])  # minimal stub
-
-    # Plan from DB (optional)
-    if plan_version_id is None:
-        plan_df = pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-    else:
-        q = text("""
-          SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-          FROM plan_line WHERE plan_version_id = :p
-        """)
-        rows = db.execute(q, {"p": plan_version_id}).mappings().all()
-        plan_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-    if not plan_df.empty:
-        plan_df["item_id"] = plan_df["item_id"].astype(str).str.strip()
-        plan_df["workshop"] = plan_df["workshop"].astype(str).fillna("")
-        plan_df["due_date"] = pd.to_datetime(plan_df["due_date"]).dt.date
-        plan_df["qty"] = pd.to_numeric(plan_df["qty"], errors="coerce").fillna(0).astype(int)
-
-    # Netting: build residual demand
-    demand_net = product_view_generate_demand(plan_df=plan_df, bom=bom, stock_df=stock_df, existing_orders_df=existing_orders_df)
-
-    # Copy out netting log and build summary
-    netting_log = NETTING_LOG.copy() if NETTING_LOG is not None else pd.DataFrame()
-    if not netting_log.empty and "date" in netting_log.columns:
-        netting_log["date"] = pd.to_datetime(netting_log["date"]).dt.date
-
-    g = netting_log.copy()
-    # Orders summary from residual demand (more reliable than log aggregation)
-    gb_orders = ["item_id", "workshop"] + (["customer"] if (demand_net is not None and "customer" in demand_net.columns) else [])
-    orders_sum = (
-        demand_net.groupby(gb_orders, as_index=False)["qty"].sum().rename(columns={"qty": "orders_created_total"})
-        if demand_net is not None and not demand_net.empty else pd.DataFrame(columns=gb_orders + ["orders_created_total"])
-    )
-    if not g.empty:
-        g["stock_used_total"] = g.get("stock_used_exact", 0).fillna(0).astype(int) + g.get("stock_used_generic", 0).fillna(0).astype(int)
-        g["receipts_used_total"] = g.get("receipts_used", 0).fillna(0).astype(int)
-        gb = ["item_id","workshop"] + (["customer"] if "customer" in g.columns else [])
-        openings = (
-            g[g["kind"] == "opening"]
-            .groupby(gb, as_index=False)[["opening_exact","opening_generic"]]
-            .max()
-            .rename(columns={"opening_exact":"opening_exact_init","opening_generic":"opening_generic_init"})
-        )
-        stock_receipts = (
-            g[g["kind"] == "day"]
-            .groupby(gb, as_index=False)[["stock_used_total","receipts_used_total"]]
-            .sum()
-        )
-        # Merge stock/receipts from log with orders from demand
-        netting_summary = (
-            stock_receipts
-            .merge(orders_sum, on=gb if set(gb) == set(gb_orders) else [c for c in gb if c in gb_orders], how="outer")
-            .merge(openings, on=gb if set(gb) == set(gb_orders) else [c for c in gb if c in gb_orders], how="left")
-            .fillna({"opening_exact_init": 0, "opening_generic_init": 0, "stock_used_total": 0, "receipts_used_total": 0, "orders_created_total": 0})
-        )
-    else:
-        netting_summary = orders_sum.copy()
-        if not netting_summary.empty:
-            netting_summary["stock_used_total"] = 0
-            netting_summary["receipts_used_total"] = 0
-            netting_summary["opening_exact_init"] = 0
-            netting_summary["opening_generic_init"] = 0
-        else:
-            netting_summary = pd.DataFrame(columns=[
-                "item_id","workshop","stock_used_total","receipts_used_total","orders_created_total","opening_exact_init","opening_generic_init"
-            ])
-
-    # Save run results to DB
-    run_meta = dict(
-        user=user,
-        mode="product_view",
-        plan_version_id=plan_version_id,
-        stock_snapshot_id=stock_snapshot_id,
-        bom_version_id="",
-        receipts_source_desc=receipts_from,
-        params={"mode":"product_view"}
-    )
-    _ = _save_netting_results_to_db(
-        db=db,
-        run_meta=run_meta,
-        demand_net=demand_net,
-        netting_log=netting_log,
-        netting_summary=netting_summary,
-        linkage_df=None,
-    )
-
-    # If residual demand is zero, skip greedy schedule gracefully
-    if demand_net is None or demand_net.empty:
-        return None, pd.DataFrame()
-
-    # Schedule using greedy (no additional stock)
-    demand = build_demand(demand_net)
-    sched = greedy_schedule(
-        demand, bom, machines,
-        start_date=None,
-        overload_pct=0.0,
-        split_child_orders=True,
-        align_roots_to_due=True,
-        stock_map=None,
-    )
-
-    out_path = Path(out_xlsx or "schedule_out.xlsx")
-    export_with_charts._machines_df = machines
-    out_file = export_with_charts(sched, out_path, bom=bom)
-
-    # Append netting_log and summary to workbook (best effort)
-    try:
-        cols = [
-            "item_id","workshop","customer","date","kind",
-            "opening_exact","opening_generic",
-            "stock_used_exact","stock_used_generic",
-            "receipts_used","order_created","available_after",
-        ]
-        log_df = NETTING_LOG.copy() if NETTING_LOG is not None else pd.DataFrame(columns=cols)
-        if "date" in log_df.columns:
-            log_df["date"] = pd.to_datetime(log_df["date"]).dt.date
-        with pd.ExcelWriter(out_path, engine="openpyxl", mode="a", if_sheet_exists="replace", date_format="yyyy-mm-dd") as xw:
-            log_df.to_excel(xw, index=False, sheet_name="netting_log")
-            g = log_df.copy()
-            gb = ["item_id","workshop"] + (["customer"] if "customer" in g.columns else [])
-            if not g.empty and "kind" in g.columns:
-                summary = (
-                    g[g["kind"]=="day"]
-                    .groupby(gb, as_index=False)[["stock_used_exact","stock_used_generic","receipts_used"]]
-                    .sum()
-                )
-                summary["stock_used_total"] = summary["stock_used_exact"].fillna(0).astype(int) + summary["stock_used_generic"].fillna(0).astype(int)
-            else:
-                summary = pd.DataFrame(columns=gb + [
-                    "stock_used_exact","stock_used_generic","receipts_used","stock_used_total"
-                ])
-            # Inject order_created from actual residual demand
-            try:
-                dn = demand_net.copy() if demand_net is not None else pd.DataFrame(columns=["item_id","workshop","qty"])  # type: ignore[name-defined]
-                if not dn.empty:
-                    if "workshop" not in dn.columns:
-                        dn["workshop"] = ""
-                    gb2 = ["item_id","workshop"] + (["customer"] if "customer" in dn.columns else [])
-                    orders_summary = dn.groupby(gb2, as_index=False)["qty"].sum().rename(columns={"qty":"order_created"})
-                    summary = (
-                        summary.drop(columns=["order_created"], errors="ignore")
-                               .merge(orders_summary, on=gb, how="outer")
-                               .fillna({"stock_used_exact":0, "stock_used_generic":0, "receipts_used":0, "stock_used_total":0, "order_created":0})
-                    )
-            except Exception:
-                pass
-            summary.to_excel(xw, index=False, sheet_name="netting_summary")
-    except Exception:
-        pass
-
-    # Persist Greedy result into PlanVersion for reports
-    try:
-        from so_planner.db.models import PlanVersion, ScheduleOp, MachineLoadDaily
-        from so_planner.scheduling.utils import compute_daily_loads
-        import pandas as pd
-
-        pname = plan_name or f"Netting {pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M')}"
-        plan = PlanVersion(name=pname, origin="product_view", status="draft")
-        db.add(plan)
-        db.commit()
-        db.refresh(plan)
-
-        df_ops = sched.copy()
-        df_ops["start_ts"] = pd.to_datetime(df_ops["date"])
-        df_ops["end_ts"] = pd.to_datetime(df_ops["date"]) + pd.to_timedelta(1, unit="D")
-        df_ops["duration_sec"] = (
-            pd.to_numeric(df_ops.get("minutes", 0), errors="coerce").fillna(0.0) * 60
-        ).astype(int)
-        df_ops["setup_sec"] = 0
-        df_ops["op_index"] = (
-            pd.to_numeric(df_ops.get("step", 1), errors="coerce").fillna(1).astype(int)
-        )
-        df_ops["batch_id"] = ""
-        df_ops["qty"] = pd.to_numeric(df_ops.get("qty", 0), errors="coerce").fillna(0.0)
-
-        article_name_map = {}
-        try:
-            if bom_path:
-                article_name_map = _L_load_bom_article_name_map(Path(bom_path))
-        except Exception:
-            article_name_map = {}
-
-        bulk_ops = []
-        for r in df_ops.itertuples(index=False):
-            article_name = article_name_map.get(str(getattr(r, "item_id", "") or "")) or None
-            bulk_ops.append(
-                ScheduleOp(
-                    plan_id=plan.id,
-                    order_id=str(r.order_id),
-                    item_id=str(r.item_id),
-                    article_name=article_name,
-                    machine_id=str(r.machine_id),
-                    start_ts=r.start_ts,
-                    end_ts=r.end_ts,
-                    qty=float(getattr(r, "qty", 0) or 0.0),
-                    duration_sec=int(r.duration_sec),
-                    setup_sec=int(getattr(r, "setup_sec", 0) or 0),
-                    op_index=int(getattr(r, "op_index", 0) or 0),
-                    batch_id=str(getattr(r, "batch_id", "") or ""),
-                )
-            )
-        if bulk_ops:
-            db.bulk_save_objects(bulk_ops)
-            db.commit()
-
-        loads_df = compute_daily_loads(df_ops)
-        bulk_loads = [
-            MachineLoadDaily(
-                plan_id=plan.id,
-                machine_id=row.machine_id,
-                work_date=row.work_date,
-                load_sec=int(row.load_sec),
-                cap_sec=int(row.cap_sec),
-                util=float(row.util),
-            )
-            for row in loads_df.itertuples(index=False)
-        ]
-        if bulk_loads:
-            db.bulk_save_objects(bulk_loads)
-            db.commit()
-
-        try:
-            plan.status = "ready"
-            db.commit()
-        except Exception:
-            db.rollback()
-
-        plan_id = int(plan.id)
-
-        # Persist due_date per order for reports (from residual demand)
-        try:
-            if 'order_id' in demand_net.columns and 'due_date' in demand_net.columns:
-                _rows = (
-                    demand_net[['order_id','due_date']]
-                    .dropna()
-                    .drop_duplicates()
-                    .to_dict('records')
-                )
-                if _rows:
-                    ins = text("""
-                        INSERT OR REPLACE INTO plan_order_info (plan_id, order_id, due_date)
-                        VALUES (:plan_id, :order_id, :due_date)
-                    """)
-                    payload = [
-                        { 'plan_id': plan_id, 'order_id': str(r['order_id']), 'due_date': str(pd.to_datetime(r['due_date']).date()) }
-                        for r in _rows if str(r.get('order_id','')).strip()!=''
-                    ]
-                    if payload:
-                        db.execute(ins, payload)
-                        db.commit()
-        except Exception:
-            db.rollback()
-    except Exception:
-        plan_id = None
-
-    return out_file, sched, plan_id
-# === Merged Product-View aware pipeline ===
 
 def run_pipeline(
     plan_path: str | None = None,
@@ -2783,12 +1964,14 @@ def run_pipeline(
     overload_pct: float = 0.0,
     split_child_orders: bool = True,
     align_roots_to_due: bool = True,
+    reserved_order_ids: Iterable[str] | None = None,
+    fixed_order_qty: dict[str, float] | None = None,
     mode: str = "",
     **kwargs,
 ):
     """
     End-to-end pipeline.
-    mode == 'product_view' -> Product-View netting (time-phased, stock fallback, receipts <= due) + greedy.
+    mode == 'standard_up' -> include parents in schedule.
     otherwise -> standard pipeline (as before).
     """
     mode = (mode or "").lower().strip()
@@ -2801,97 +1984,12 @@ def run_pipeline(
         except Exception:
             return None
 
-    # --- Product-View branch ---
-    if mode == "product_view":
-        db: Session | None = kwargs.get("db")
-        plan_version_id: int | None = kwargs.get("plan_version_id")
-        stock_snapshot_id: int | None = kwargs.get("stock_snapshot_id")
-        receipts_from: str = kwargs.get("receipts_from", "plan")
-        receipts_excel_path: str | None = kwargs.get("receipts_excel_path")
-        user: str = kwargs.get("user", "ui")
-
-        if db is not None and plan_version_id is not None and stock_snapshot_id is not None:
-            out_file, sched, _ = run_product_view_from_db(
-                db=db,
-                plan_version_id=plan_version_id,
-                stock_snapshot_id=stock_snapshot_id,
-                receipts_from=receipts_from,
-                receipts_excel_path=receipts_excel_path,
-                bom_path=bom_path,
-                machines_path=machines_path,
-                out_xlsx=out_xlsx,
-                user=user,
-                plan_name=kwargs.get("plan_name"),
-            )
-            return out_file, sched
-
-        plan_df = load_plan_of_sales(Path(plan_path))
-        bom = load_bom(Path(bom_path))
-        machines = load_machines(Path(machines_path))
-
-        stock_df = None
-        if stock_path:
-            try:
-                stock_df = load_stock_any(Path(stock_path))
-                if stock_df is not None and "workshop" not in stock_df.columns:
-                    stock_df["workshop"] = ""
-            except Exception:
-                stock_df = None
-
-        existing = None
-        if out_xlsx and Path(out_xlsx).exists():
-            try:
-                tmp = pd.read_excel(Path(out_xlsx), sheet_name="schedule")
-                keep = [c for c in ["item_id", "due_date", "qty", "workshop"] if c in tmp.columns]
-                existing = tmp[keep].copy() if keep else None
-            except Exception:
-                existing = None
-
-        demand_net = product_view_generate_demand(
-            plan_df=plan_df,
-            bom=bom,
-            stock_df=stock_df,
-            existing_orders_df=existing,
-            fixed_orders_df=kwargs.get("fixed_orders_df"),
-        )
-        demand = demand_net.copy()
-        if not demand.empty and "priority" in demand.columns:
-            demand["priority"] = pd.to_datetime(demand["priority"]).dt.to_pydatetime()
-
-        sched = greedy_schedule(
-            demand,
-            bom,
-            machines,
-            start_date=_parse_start(start_date),
-            overload_pct=overload_pct,
-            split_child_orders=split_child_orders,
-            align_roots_to_due=align_roots_to_due,
-            stock_map=None,
-            expand=False,
-        )
-        export_with_charts._machines_df = machines
-        out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
-        return out_file, sched
-
     # --- Standard pipeline ---
-    db: Session | None = kwargs.get("db")
-    plan_version_id = kwargs.get("plan_version_id")
-    plan_df: pd.DataFrame
-    if db is not None and plan_version_id is not None:
-        try:
-            _ensure_netting_tables(db)
-            rows = db.execute(text("""
-                SELECT item_id, due_date, qty, COALESCE(workshop,'') AS workshop
-                FROM plan_line WHERE plan_version_id=:p
-            """), {"p": plan_version_id}).mappings().all()
-            plan_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["item_id","due_date","qty","workshop"])
-        except Exception as e:
-            print("[GREEDY WARN] failed to load plan_line:", e)
-            plan_df = load_plan_of_sales(Path(plan_path))
-    else:
-        plan_df = load_plan_of_sales(Path(plan_path))
+    if not plan_path:
+        raise ValueError("plan_path is required for standard pipeline")
+    plan_df = load_plan_of_sales(Path(plan_path))
 
-    demand = build_demand(plan_df)
+    demand = build_demand(plan_df, reserved_order_ids=reserved_order_ids)
     bom = load_bom(Path(bom_path))
     machines = load_machines(Path(machines_path))
 
@@ -2916,7 +2014,6 @@ def run_pipeline(
             print("[GREEDY WARN] stock load failed:", e)
             stock_map = None
 
-    demand = expand_demand_with_hierarchy(demand, bom, split_child_orders=split_child_orders, include_parents=False)
     sched = greedy_schedule(
         demand,
         bom,
@@ -2926,8 +2023,23 @@ def run_pipeline(
         split_child_orders=split_child_orders,
         align_roots_to_due=align_roots_to_due,
         stock_map=stock_map,
+        reserved_order_ids=reserved_order_ids,
+        fixed_order_qty=fixed_order_qty,
         include_parents=(mode == "standard_up"),
     )
+
+    sched_reb = _rebalance_unfixed_by_item_schedule(
+        sched,
+        bom,
+        stock_map,
+        fixed_order_qty,
+    )
+    if sched_reb is None or sched_reb.empty:
+        logging.getLogger("so_planner.rebalance").warning(
+            "rebalance produced empty schedule; keeping original"
+        )
+    else:
+        sched = sched_reb
 
     export_with_charts._machines_df = machines
     out_file = export_with_charts(sched, Path(out_xlsx), bom=bom)
@@ -2969,6 +2081,8 @@ def run_greedy(*args, **kwargs):
     split_child_orders = bool(kwargs.get("split_child_orders") or False)
     align_roots_to_due = bool(kwargs.get("align_roots_to_due") or False)
     mode               = (kwargs.get("mode") or "").lower().strip()
+    reserved_order_ids = kwargs.get("reserved_order_ids") or None
+    fixed_order_qty    = kwargs.get("fixed_order_qty")    or None
 
     out_file, sched = run_pipeline(
         plan_path, bom_path, machines_path, out_xlsx,
@@ -2977,6 +2091,8 @@ def run_greedy(*args, **kwargs):
         overload_pct=overload_pct,
         split_child_orders=split_child_orders,
         align_roots_to_due=align_roots_to_due,
+        reserved_order_ids=reserved_order_ids,
+        fixed_order_qty=fixed_order_qty,
         mode=mode,
     )
 
@@ -3012,8 +2128,7 @@ except Exception:
     pass
 
 
-# --- Overrides added to support 'customer' on plan/netting and arbitrary item ids ---
-def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:  # type: ignore[override]
+def build_demand(plan_df: pd.DataFrame, *, reserved_order_ids: Iterable[str] | None = None) -> pd.DataFrame:  # type: ignore[override]
     """Aggregate demand.
 
     If a 'customer' column exists in plan_df, group by it and keep it in the
@@ -3026,13 +2141,20 @@ def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:  # type: ignore[overrid
 
     from collections import defaultdict
     seq: dict[tuple[str, object], int] = defaultdict(int)
+    reserved = {str(x) for x in (reserved_order_ids or []) if str(x)}
+    used: set[str] = set()
     order_ids: list[str] = []
     for _, r in g.iterrows():
         base = str(r.get("customer", "") or r["item_id"])
         key = (base, r["due_date"])  # sequence per (customer|item, date)
-        seq[key] = seq.get(key, 0) + 1
-        oid = f"{base}-{pd.to_datetime(r['due_date']).strftime('%Y%m%d')}-{seq[key]:04d}"
+        while True:
+            seq[key] = seq.get(key, 0) + 1
+            oid = f"{base}-{pd.to_datetime(r['due_date']).strftime('%Y%m%d')}-{seq[key]:04d}"
+            if oid in reserved or oid in used:
+                continue
+            break
         order_ids.append(oid)
+        used.add(oid)
     g["order_id"] = order_ids
     g["priority"] = pd.to_datetime(g["due_date"])  # default priority
     cols = ["order_id", "item_id", "due_date", "qty", "priority"]
@@ -3041,15 +2163,43 @@ def build_demand(plan_df: pd.DataFrame) -> pd.DataFrame:  # type: ignore[overrid
     return g[cols]
 
 
-def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, split_child_orders: bool = False, include_parents: bool = False) -> pd.DataFrame:
+def expand_demand_with_hierarchy(
+    demand: pd.DataFrame,
+    bom: pd.DataFrame,
+    *,
+    split_child_orders: bool = False,
+    include_parents: bool = False,
+    reserved_order_ids: Iterable[str] | None = None,
+    fixed_order_qty: dict[str, float] | None = None,
+    stock_map: dict | None = None,
+    item_workshop: dict[str, str] | None = None,
+) -> pd.DataFrame:
     # Build parent and children maps from BOM
     parents: dict[str, str] = {}
     children_map: dict[str, dict[str, float]] = {}
     for r in bom.itertuples(index=False):
-        p = r.root_item_id; c = r.item_id
+        p = r.root_item_id
+        c = r.item_id
         parents[str(c)] = str(p)
         if p and p != c:
             children_map.setdefault(str(p), {})[str(c)] = float(getattr(r, "qty_per_parent", 1.0)) or 1.0
+
+    lag_map_by_edge: dict[tuple[str, str], int] = {}
+    if "lag_days" in bom.columns:
+        try:
+            tmp = bom[["root_item_id", "item_id", "lag_days"]].copy()
+            tmp["root_item_id"] = tmp["root_item_id"].astype(str).str.strip()
+            tmp["item_id"] = tmp["item_id"].astype(str).str.strip()
+            tmp["lag_days"] = pd.to_numeric(tmp["lag_days"], errors="coerce").fillna(0).astype(int)
+            tmp = tmp[(tmp["root_item_id"] != "") & (tmp["root_item_id"] != tmp["item_id"])]
+            if not tmp.empty:
+                tmp = tmp.groupby(["root_item_id", "item_id"], as_index=False)["lag_days"].max()
+                lag_map_by_edge = {
+                    (str(r.root_item_id), str(r.item_id)): int(r.lag_days)
+                    for r in tmp.itertuples(index=False)
+                }
+        except Exception:
+            lag_map_by_edge = {}
 
     def ancestors(x: str) -> list[str]:
         out: list[str] = []
@@ -3064,67 +2214,208 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
             cur = p
         return out
 
-    def descendants_with_factor(x: str) -> list[tuple[str, float, str]]:
-        """
-        Возвращаем всех потомков с накопленным коэффициентом.
-        Не используем глобальное dedуп, чтобы ребёнок мог прийти через нескольких родителей;
-        цикл режем только по текущему пути.
-        """
-        out: list[tuple[str, float, str]] = []
-        stack: list[tuple[str, float, set[str]]] = [(x, 1.0, {x})]
-        while stack:
-            cur, f, path = stack.pop()
-            for ch, r in (children_map.get(cur, {}) or {}).items():
-                if ch in path:
-                    continue
-                f_new = f * (r if np.isfinite(r) and r > 0 else 1.0)
-                out.append((ch, f_new, cur))
-                stack.append((ch, f_new, path | {ch}))
-        return out
+    reserved = {str(x) for x in (reserved_order_ids or []) if str(x)}
+    fixed_qty: dict[str, float] = {}
+    for k, v in (fixed_order_qty or {}).items():
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if not np.isfinite(fv):
+            continue
+        fixed_qty[str(k)] = max(0.0, fv)
+    used: set[str] = set()
+    base_order_map: dict[str, str] = {}
+    order_id_map: dict[tuple[str, str, str], str] = {}
+    item_ws = item_workshop or {}
+
+    smap = None
+    if stock_map:
+        smap = {}
+        for k, v in stock_map.items():
+            if isinstance(k, tuple) and len(k) == 2:
+                smap[(str(k[0]), str(k[1]))] = float(v or 0.0)
+            else:
+                smap[str(k)] = float(v or 0.0)
+
+    def _consume_stock(item: str, qty: float, wk: str) -> float:
+        if not smap or qty <= 0:
+            return qty
+        needed = float(qty)
+        tried = []
+        for key in ((item, wk), (item, ""), item):
+            if key in tried:
+                continue
+            tried.append(key)
+            avail = smap.get(key, 0.0)
+            if avail <= 0:
+                continue
+            take = min(needed, float(avail))
+            smap[key] = float(avail) - take
+            needed -= take
+            if needed <= 0:
+                break
+        if needed > 0:
+            for key, avail in list(smap.items()):
+                if isinstance(key, tuple) and len(key) == 2 and str(key[0]) == item and key not in tried:
+                    if avail <= 0:
+                        continue
+                    take = min(needed, float(avail))
+                    smap[key] = float(avail) - take
+                    needed -= take
+                    if needed <= 0:
+                        break
+        return needed
+
+    def _shift_due(due, item: str, parent_item_id: str | None = None):
+        if due is None or pd.isna(due):
+            return due
+        try:
+            base_due = pd.to_datetime(due).date()
+        except Exception:
+            return due
+        parent_item = str(parent_item_id or "")
+        lag = 0
+        if parent_item:
+            lag = int(lag_map_by_edge.get((parent_item, str(item)), 0) or 0)
+        if lag <= 0:
+            return base_due
+        try:
+            return base_due - dt.timedelta(days=lag)
+        except Exception:
+            return base_due
+
+    def _unique_oid(oid: str) -> str:
+        if oid not in reserved and oid not in used:
+            used.add(oid)
+            return oid
+        i = 1
+        while True:
+            cand = f"{oid}~{i}"
+            if cand not in reserved and cand not in used:
+                used.add(cand)
+                return cand
+            i += 1
+
+    def _order_id(base_oid: str, item: str, parent_item_id: str | None = None) -> str:
+        if split_child_orders:
+            key = (base_oid, item, str(parent_item_id or ""))
+            if key not in order_id_map:
+                order_id_map[key] = _unique_oid(f"{base_oid}:{item}")
+            return order_id_map[key]
+        if base_oid not in base_order_map:
+            base_order_map[base_oid] = _unique_oid(base_oid)
+        return base_order_map[base_oid]
 
     rows: list[dict[str, object]] = []
+
+    def _add_row(
+        base_oid_row: str,
+        oid: str,
+        item: str,
+        qty: float,
+        due,
+        pr,
+        role: str,
+        cust,
+        parent_item_id: str | None,
+    ) -> None:
+        qty_int = int(round(qty))
+        if qty_int <= 0:
+            return
+        row = {
+            "base_order_id": base_oid_row,
+            "order_id": oid,
+            "item_id": item,
+            "due_date": due,
+            "qty": qty_int,
+            "priority": pr,
+            "role": role,
+            "customer": (str(cust) if cust is not None else None),
+        }
+        if parent_item_id:
+            row["parent_item_id"] = str(parent_item_id)
+        rows.append(row)
+
+    def _plan_item(
+        base_oid: str,
+        base_oid_row: str,
+        item: str,
+        required_qty: float,
+        due,
+        pr,
+        role: str,
+        cust,
+        parent_item_id: str | None,
+        path: set[str],
+    ) -> float:
+        req = float(required_qty) if np.isfinite(required_qty) else 0.0
+        req = max(req, 0.0)
+        oid_fixed = _order_id(base_oid, item, parent_item_id)
+        fixed = float(fixed_qty.get(oid_fixed, 0.0) or 0.0)
+        if fixed < 0:
+            fixed = 0.0
+        target = max(req, fixed)
+        extra = max(target - fixed, 0.0)
+        wk = item_ws.get(item, "")
+        remaining = _consume_stock(item, extra, wk)
+        new_qty = remaining
+        production = fixed + new_qty
+
+        if fixed > 0:
+            _add_row(base_oid_row, oid_fixed, item, fixed, due, pr, role, cust, parent_item_id)
+        if new_qty > 0:
+            oid_new = _unique_oid(oid_fixed) if fixed > 0 else oid_fixed
+            _add_row(base_oid_row, oid_new, item, new_qty, due, pr, role, cust, parent_item_id)
+
+        if production <= 0:
+            return 0.0
+
+        for ch, mult in (children_map.get(item, {}) or {}).items():
+            ch = str(ch)
+            if ch in path:
+                continue
+            mult_val = mult if np.isfinite(mult) and mult > 0 else 1.0
+            child_req = production * float(mult_val)
+            child_due = _shift_due(due, ch, parent_item_id=item)
+            _plan_item(
+                base_oid,
+                base_oid_row,
+                ch,
+                child_req,
+                child_due,
+                pr,
+                "CHILD",
+                cust,
+                item,
+                path | {ch},
+            )
+        return production
+
     for r in demand.itertuples(index=False):
         base_oid = str(r.order_id)
         it = str(r.item_id)
         due = r.due_date
-        qty = int(r.qty)
+        qty = float(r.qty) if not pd.isna(r.qty) else 0.0
         pr = r.priority
         cust = getattr(r, "customer", None)
-
-        rows.append({
-            "base_order_id": base_oid,
-            "order_id": (f"{base_oid}:{it}" if split_child_orders else base_oid),
-            "item_id": it,
-            "due_date": due,
-            "qty": qty,
-            "priority": pr,
-            "role": "FG",
-            "customer": (str(cust) if cust is not None else None),
-        })
-        if include_parents:
+        base_oid_row = base_oid if split_child_orders else _order_id(base_oid, it)
+        prod_qty = _plan_item(
+            base_oid,
+            base_oid_row,
+            it,
+            qty,
+            due,
+            pr,
+            "FG",
+            cust,
+            None,
+            {it},
+        )
+        if include_parents and prod_qty > 0:
             for a in ancestors(it):
-                rows.append({
-                    "base_order_id": base_oid,
-                    "order_id": (f"{base_oid}:{a}" if split_child_orders else base_oid),
-                    "item_id": a,
-                    "due_date": due,
-                    "qty": qty,
-                    "priority": pr,
-                    "role": "PARENT",
-                    "customer": (str(cust) if cust is not None else None),
-                })
-        for d, fmul, parent in descendants_with_factor(it):
-            rows.append({
-                "base_order_id": base_oid,
-                "order_id": (f"{base_oid}:{d}" if split_child_orders else base_oid),
-                "item_id": d,
-                "due_date": due,
-                "qty": int(round(qty * float(fmul))),
-                "priority": pr,
-                "role": "CHILD",
-                "customer": (str(cust) if cust is not None else None),
-                "parent_item_id": str(parent),
-            })
+                oid_parent = _unique_oid(_order_id(base_oid, a))
+                _add_row(base_oid_row, oid_parent, a, prod_qty, due, pr, "PARENT", cust, None)
 
     exp = pd.DataFrame(rows)
     if exp.empty:
@@ -3136,419 +2427,4 @@ def expand_demand_with_hierarchy(demand: pd.DataFrame, bom: pd.DataFrame, *, spl
     return exp
 
 
-def product_view_generate_demand(  # type: ignore[override]
-    plan_df: pd.DataFrame,
-    bom: pd.DataFrame,
-    stock_df: pd.DataFrame | None = None,
-    existing_orders_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Time-phased netting in two phases to avoid over-planning children.
 
-    Phase 1: net only FG (plan items) -> get residual FG orders.
-    Phase 2: expand residual FG orders via BOM to children and net them.
-    """
-    def C(df, name):
-        m = {str(c).lower(): c for c in df.columns}
-        return m.get(name.lower(), name)
-
-    need = ["item_id", "due_date", "qty"]
-    miss = [n for n in need if C(plan_df, n) not in plan_df.columns]
-    if miss:
-        raise ValueError("plan_df must contain item_id, due_date, qty")
-
-    base_plan = (plan_df
-                 .rename(columns={C(plan_df, "item_id"): "item_id",
-                                  C(plan_df, "due_date"): "due_date",
-                                  C(plan_df, "qty"): "qty"})
-                 .copy())
-    base_plan["item_id"] = base_plan["item_id"].astype(str).str.strip()
-    base_plan["due_date"] = pd.to_datetime(base_plan["due_date"]).dt.date
-    base_plan["qty"] = pd.to_numeric(base_plan["qty"], errors="coerce").fillna(0).astype(int)
-    if C(plan_df, "customer") in plan_df.columns:
-        base_plan["customer"] = plan_df[C(plan_df, "customer")].astype(str).fillna("").str.strip()
-
-    # Default workshop per item (optional)
-    item_workshop: dict[str, str] = {}
-    if "workshop" in bom.columns:
-        bw = bom[["item_id", "workshop"]].dropna().drop_duplicates("item_id")
-        item_workshop = dict(zip(bw["item_id"].astype(str), bw["workshop"].astype(str)))
-
-    # Build stock and receipts maps
-    if stock_df is None:
-        stock_df = pd.DataFrame(columns=["item_id", "stock_qty", "workshop", "customer"])
-    s = stock_df.copy()
-    if "workshop" not in s.columns:
-        s["workshop"] = ""
-    s["item_id"] = s["item_id"].astype(str).str.strip()
-    s["workshop"] = s["workshop"].astype(str).fillna("")
-    if "customer" not in s.columns:
-        s["customer"] = ""
-    else:
-        s["customer"] = s["customer"].astype(str).fillna("").str.strip()
-    s["stock_qty"] = pd.to_numeric(s["stock_qty"], errors="coerce").fillna(0).astype(int)
-    # Exact per (item,workshop,customer)
-    stock_exact = (s.groupby(["item_id", "workshop", "customer"], as_index=False)["stock_qty"].sum()
-                     .set_index(["item_id", "workshop", "customer"])["stock_qty"].to_dict())
-    # Global stock pool per (item,customer) (sum across all workshops)
-    stock_pool = (s.groupby(["item_id", "customer"], as_index=False)["stock_qty"].sum()
-                    .set_index(["item_id", "customer"])["stock_qty"].to_dict())
-
-    if existing_orders_df is None:
-        existing_orders_df = pd.DataFrame(columns=["item_id", "due_date", "qty", "workshop"])
-    rec = existing_orders_df.copy()
-    if "workshop" not in rec.columns:
-        rec["workshop"] = ""
-    rec["item_id"] = rec["item_id"].astype(str).str.strip()
-    rec["workshop"] = rec["workshop"].astype(str).fillna("")
-    rec["due_date"] = pd.to_datetime(rec["due_date"]).dt.date
-    rec["qty"] = pd.to_numeric(rec["qty"], errors="coerce").fillna(0).astype(int)
-    receipts = (rec.groupby(["item_id", "workshop", "due_date"], as_index=False)["qty"].sum()
-                  .sort_values(["item_id", "workshop", "due_date"]))
-
-    # Helper: netting for a demand table grouped by (item_id, workshop, due_date[, customer])
-    def net_pass(dem_df: pd.DataFrame) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        out: list[dict[str, object]] = []
-        logs: list[dict[str, object]] = []
-        seq: dict[tuple[str, object], int] = {}
-        outer_keys = ["item_id", "workshop"] + (["customer"] if "customer" in dem_df.columns else [])
-        for key_vals, block in dem_df.groupby(outer_keys):
-            if isinstance(key_vals, tuple):
-                it = str(key_vals[0]); wk = str(key_vals[1]); cust = (str(key_vals[2]) if len(key_vals) > 2 else "")
-            else:
-                it = str(key_vals); wk = ""; cust = ""
-            block = block.sort_values("due_date")
-
-            # Available exact for this workshop is limited by customer-specific global pool
-            pool = float(stock_pool.get((it, cust), 0.0))
-            avail_exact = min(float(stock_exact.get((it, wk, cust), 0.0)), pool)
-            receipts_remain = 0.0
-
-            logs.append({
-                "item_id": it, "workshop": wk, "customer": cust, "date": None, "kind": "opening",
-                "opening_exact": int(avail_exact), "opening_generic": int(max(0.0, pool - avail_exact)),
-                "stock_used_exact": 0, "stock_used_generic": 0,
-                "receipts_used": 0, "order_created": 0, "available_after": int(pool)
-            })
-
-            rb = receipts[(receipts["item_id"] == it) & (receipts["workshop"] == wk)].sort_values("due_date")
-            r_dates = rb["due_date"].tolist(); r_qtys = rb["qty"].tolist(); ridx = 0
-
-            for r in block.itertuples(index=False):
-                dd, need = r.due_date, int(r.qty)
-                while ridx < len(r_dates) and r_dates[ridx] <= dd:
-                    receipts_remain += float(r_qtys[ridx]); ridx += 1
-
-                # Use exact first (bounded by pool), then global pool as generic
-                pool = float(stock_pool.get((it, cust), 0.0))
-                take_exact_cap = min(float(stock_exact.get((it, wk, cust), 0.0)), pool)
-                stock_used_exact = min(need, int(take_exact_cap))
-                need -= stock_used_exact
-                stock_pool[(it, cust)] = max(0.0, pool - stock_used_exact)
-
-                stock_used_generic = 0
-                if need > 0 and stock_pool.get((it, cust), 0.0) > 0:
-                    gen_avail = float(stock_pool.get((it, cust), 0.0))
-                    stock_used_generic = min(need, int(gen_avail))
-                    need -= stock_used_generic
-                    stock_pool[(it, cust)] = max(0.0, gen_avail - stock_used_generic)
-
-                receipts_used = 0
-                if need > 0 and receipts_remain > 0:
-                    take = min(need, int(receipts_remain)); receipts_used = take; receipts_remain -= take; need -= take
-
-                order_created = 0
-                if need > 0:
-                    order_created = need
-                    base_prefix = str(cust) if ("customer" in dem_df.columns and str(cust) != "") else str(it)
-                    key = (base_prefix, pd.to_datetime(dd).date())
-                    seq[key] = seq.get(key, 0) + 1
-                    oid = f"{base_prefix}-{pd.to_datetime(dd).strftime('%Y%m%d')}-PV{seq[key]:03d}"
-                    out.append({
-                        "order_id": oid, "item_id": it, "due_date": dd,
-                        "qty": order_created, "priority": pd.to_datetime(dd), "workshop": wk,
-                        "customer": str(cust) if ("customer" in dem_df.columns) else "",
-                    })
-                    need = 0
-
-            available_after = int(max(0.0, float(stock_pool.get((it, cust), 0.0)) + receipts_remain))
-            logs.append({
-                    "item_id": it, "workshop": wk, "customer": cust, "date": dd, "kind": "day",
-                    "opening_exact": None, "opening_generic": None,
-                    "stock_used_exact": int(stock_used_exact),
-                    "stock_used_generic": int(stock_used_generic),
-                    "receipts_used": int(receipts_used),
-                    "order_created": int(order_created),
-                    "available_after": int(available_after),
-                })
-        return out, logs
-
-    # Phase 1: net FG (plan-level) demand only
-    fg = base_plan.copy()
-    fg["workshop"] = fg["item_id"].map(item_workshop).fillna("")
-    group_keys = ["item_id", "workshop", "due_date"] + (["customer"] if "customer" in fg.columns else [])
-    fg_dem = (fg.groupby(group_keys, as_index=False)["qty"].sum().sort_values(group_keys))
-    fg_orders, log_fg = net_pass(fg_dem)
-    fg_orders_df = pd.DataFrame(fg_orders, columns=["order_id","item_id","due_date","qty","priority","workshop","customer"])
-
-    # Prepare BOM as parent->child with ratios
-    b = bom.copy()
-    if "root_item_id" not in b.columns:
-        b["root_item_id"] = ""
-    b["root_item_id"] = b["root_item_id"].astype(str).str.strip()
-    b["item_id"] = b["item_id"].astype(str).str.strip()
-    if "qty_per_parent" not in b.columns:
-        b["qty_per_parent"] = 1.0
-    b["qty_per_parent"] = pd.to_numeric(b["qty_per_parent"], errors="coerce").fillna(1.0).astype(float)
-
-    # Phase 2: expand residual FG orders to children and net them
-    if not fg_orders_df.empty:
-        exp2 = expand_demand_with_hierarchy(fg_orders_df, b, split_child_orders=True, include_parents=False)
-        exp2["workshop"] = exp2["item_id"].map(item_workshop).fillna("")
-        dem_children = exp2[exp2.get("role","CHILD").eq("CHILD")].copy()
-        if dem_children.empty:
-            child_orders = []
-            log_child = []
-        else:
-            group_keys2 = ["item_id","workshop","due_date"] + (["customer"] if "customer" in dem_children.columns else [])
-            dem_children = (dem_children.groupby(group_keys2, as_index=False)["qty"].sum().sort_values(group_keys2))
-            child_orders, log_child = net_pass(dem_children)
-    else:
-        child_orders = []
-        log_child = []
-
-    # Combine
-    all_orders = fg_orders + child_orders
-    order_cols = ["order_id", "item_id", "due_date", "qty", "priority", "workshop", "customer"]
-    orders_df = pd.DataFrame(all_orders, columns=order_cols)
-
-    # Logs
-    global NETTING_LOG
-    NETTING_LOG = pd.DataFrame(log_fg + log_child, columns=[
-        "item_id","workshop","customer","date","kind",
-        "opening_exact","opening_generic",
-        "stock_used_exact","stock_used_generic",
-        "receipts_used","order_created","available_after",
-    ])
-
-    return orders_df
-
-
-def _ensure_netting_tables(db: Session) -> None:  # type: ignore[override]
-    """Ensure minimal netting tables exist; add missing 'customer' column if needed."""
-    # base tables (keep simple; SQLite dialect)
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS plan_version (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        status TEXT,
-        horizon_start DATE,
-        horizon_end DATE,
-        notes TEXT,
-        origin TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS plan_line (
-        id INTEGER PRIMARY KEY,
-        plan_version_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        due_date DATE NOT NULL,
-        qty INTEGER NOT NULL,
-        priority DATETIME NULL,
-        customer TEXT NULL,
-        workshop TEXT NULL,
-        source_tag TEXT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS receipts_plan (
-        id INTEGER PRIMARY KEY,
-        plan_version_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        due_date DATE NOT NULL,
-        qty INTEGER NOT NULL,
-        workshop TEXT NULL,
-        receipt_type TEXT,
-        source_ref TEXT NULL
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS stock_snapshot (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        taken_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS stock_line (
-        id INTEGER PRIMARY KEY,
-        snapshot_id INTEGER NOT NULL,
-        item_id TEXT NOT NULL,
-        workshop TEXT DEFAULT '',
-        stock_qty INTEGER NOT NULL
-    );
-    """))
-
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_run (
-        id INTEGER PRIMARY KEY,
-        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        finished_at DATETIME,
-        user TEXT,
-        mode TEXT,
-        plan_version_id INTEGER,
-        stock_snapshot_id INTEGER,
-        bom_version_id TEXT,
-        receipts_source_desc TEXT,
-        params TEXT,
-        status TEXT
-    );
-    """))
-    db.execute(text("""
-    CREATE TABLE IF NOT EXISTS netting_order (
-        id INTEGER PRIMARY KEY,
-        netting_run_id INTEGER NOT NULL,
-        order_id TEXT,
-        item_id TEXT,
-        due_date DATE,
-        qty INTEGER,
-        priority DATETIME NULL,
-        workshop TEXT NULL,
-        customer TEXT NULL
-    );
-    """))
-
-    # add customer column if missing (for already created tables)
-    try:
-        cols = db.execute(text("PRAGMA table_info(netting_order)")).mappings().all()
-        names = {str(r.name) if hasattr(r, "name") else str(r[1]) for r in cols}  # support SQLite row shapes
-        if "customer" not in names:
-            db.execute(text("ALTER TABLE netting_order ADD COLUMN customer TEXT"))
-    except Exception:
-        pass
-
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_plan_line_main ON plan_line(plan_version_id,item_id,due_date);
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_receipts_plan_main ON receipts_plan(plan_version_id,item_id,due_date);
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_stock_line_main ON stock_line(snapshot_id,item_id,workshop);
-    """))
-    db.execute(text("""
-    CREATE INDEX IF NOT EXISTS ix_netting_order ON netting_order(netting_run_id,item_id,due_date);
-    """))
-    db.commit()
-
-
-def _save_netting_results_to_db(  # type: ignore[override]
-    db: Session,
-    run_meta: dict,
-    demand_net: pd.DataFrame,
-    netting_log: pd.DataFrame,
-    netting_summary: pd.DataFrame,
-    linkage_df: pd.DataFrame | None = None,
-) -> int:
-    ins = text("""
-      INSERT INTO netting_run (started_at, finished_at, user, mode, plan_version_id,
-                               stock_snapshot_id, bom_version_id, receipts_source_desc, params, status)
-      VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :user, :mode, :plan_version_id,
-              :stock_snapshot_id, :bom_version_id, :receipts_source_desc, :params, 'done')
-      RETURNING id
-    """)
-    rid = db.execute(
-        ins,
-        {
-            "user": run_meta.get("user", "ui"),
-            "mode": "product_view",
-            "plan_version_id": run_meta.get("plan_version_id"),
-            "stock_snapshot_id": run_meta.get("stock_snapshot_id"),
-            "bom_version_id": run_meta.get("bom_version_id", ""),
-            "receipts_source_desc": run_meta.get("receipts_source_desc", "plan"),
-            "params": json.dumps(run_meta.get("params", {}), ensure_ascii=False),
-        },
-    ).scalar_one()
-
-    if not demand_net.empty:
-        payload = demand_net.copy()
-        for col in ("order_id", "item_id", "workshop", "customer"):
-            if col not in payload.columns:
-                payload[col] = ""
-        payload["priority"] = pd.to_datetime(payload["priority"]).apply(lambda x: x.to_pydatetime())
-        rows = [
-            {
-                "order_id": str(r.order_id),
-                "item_id": str(r.item_id),
-                "due_date": r.due_date,  # already date
-                "qty": int(r.qty),
-                "priority": (str(r.priority) if getattr(r, "priority", None) is not None else None),
-                "workshop": str(getattr(r, "workshop", "") or ""),
-                "customer": str(getattr(r, "customer", "") or ""),
-            }
-            for r in payload.itertuples(index=False)
-        ]
-        db.execute(text("""
-            INSERT INTO netting_order (netting_run_id, order_id, item_id, due_date, qty, priority, workshop, customer)
-            VALUES (:rid, :order_id, :item_id, :due_date, :qty, :priority, :workshop, :customer)
-        """), [dict(r, rid=rid) for r in rows])
-
-    if not netting_log.empty:
-        _log = netting_log.copy()
-        try:
-            import pandas as _pd
-            if "date" in _log.columns:
-                _log["date"] = _pd.to_datetime(_log["date"], errors="coerce").dt.date
-                _log["date"] = _log["date"].where(_log["date"].notna(), None)
-            for c in [
-                "opening_exact","opening_generic",
-                "stock_used_exact","stock_used_generic",
-                "receipts_used","order_created","available_after",
-            ]:
-                if c in _log.columns:
-                    _log[c] = _pd.to_numeric(_log[c], errors="coerce")
-                    _log[c] = _log[c].where(_log[c].notna(), None)
-        except Exception:
-            pass
-        rows = _log.to_dict("records")
-        db.execute(text("""
-            INSERT INTO netting_log_row
-            (netting_run_id, item_id, workshop, date, kind,
-             opening_exact, opening_generic,
-             stock_used_exact, stock_used_generic,
-             receipts_used, order_created, available_after)
-            VALUES
-            (:rid, :item_id, :workshop, :date, :kind,
-             :opening_exact, :opening_generic,
-             :stock_used_exact, :stock_used_generic,
-             :receipts_used, :order_created, :available_after)
-        """), [dict(r, rid=rid) for r in rows])
-
-    if not netting_summary.empty:
-        rows = netting_summary.to_dict("records")
-        db.execute(text("""
-            INSERT INTO netting_summary_row
-            (netting_run_id, item_id, workshop,
-             stock_used_total, receipts_used_total, orders_created_total,
-             opening_exact_init, opening_generic_init)
-            VALUES
-            (:rid, :item_id, :workshop,
-             :stock_used_total, :receipts_used_total, :orders_created_total,
-             :opening_exact_init, :opening_generic_init)
-        """), [dict(r, rid=rid) for r in rows])
-
-    if linkage_df is not None and not linkage_df.empty:
-        rows = linkage_df.to_dict("records")
-        db.execute(text("""
-            INSERT INTO demand_linkage
-            (netting_run_id, parent_item_id, parent_due_date,
-             child_item_id, child_due_date, qty_per_parent, required_qty)
-            VALUES
-            (:rid, :parent_item_id, :parent_due_date,
-             :child_item_id, :child_due_date, :qty_per_parent, :required_qty)
-        """), [dict(r, rid=rid) for r in rows])
-
-    db.commit()
-    return int(rid)
