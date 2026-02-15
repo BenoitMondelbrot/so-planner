@@ -5,17 +5,37 @@ from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session
 from ...db import get_db
 import os, logging
-from pydantic import BaseModel
+from ...bom_versioning import (
+    article_name_map_from_df,
+    bom_df_to_scheduler_df,
+    get_resolved_bom_version,
+    get_version_rows_df,
+)
 from ...db.models import PlanVersion, ScheduleOp, MachineLoadDaily, DimMachine
-from ...scheduling.greedy_scheduler import run_pipeline, _ensure_support_tables, load_stock_any
+from ...sales_plan_versioning import (
+    get_resolved_sales_plan_version,
+    get_sales_plan_demand_df,
+)
+from ...scheduling.greedy_scheduler import (
+    run_pipeline,
+    _ensure_support_tables,
+    load_stock_any,
+    build_demand as _build_demand,
+    _append_receipts_demand,
+)
 from ...scheduling.utils import compute_daily_loads
-from ...scheduling.greedy.loaders import load_machines as _load_machines, load_bom_article_name_map
+from ...scheduling.greedy.loaders import (
+    load_machines as _load_machines,
+    load_plan_of_sales,
+    load_receipts_any,
+)
 from pathlib import Path
 from typing import Optional, List, Dict
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 router = APIRouter(prefix="/plans", tags=["plans"])
+RECEIPT_ORDER_TOKEN = "-RCPT-"
 
 def _normalize_workshop_tokens(raw: str | None) -> set[str]:
     if not raw:
@@ -32,7 +52,18 @@ def _ensure_plan_order_table(db: Session) -> None:
     _ensure_support_tables(db)
     try:
         cols = db.execute(text("PRAGMA table_info(plan_order_info)")).mappings().all()
-        names = {str(getattr(r, "name", r[1])) for r in cols}
+        def _col_name(row) -> str:
+            if isinstance(row, dict):
+                return str(row.get("name") or "")
+            try:
+                return str(row.get("name") or "")
+            except Exception:
+                pass
+            try:
+                return str(row[1])
+            except Exception:
+                return ""
+        names = {_col_name(r) for r in cols if _col_name(r)}
         def _add(col: str, ddl: str) -> None:
             if col not in names:
                 db.execute(text(f"ALTER TABLE plan_order_info ADD COLUMN {col} {ddl}"))
@@ -45,6 +76,7 @@ def _ensure_plan_order_table(db: Session) -> None:
         _add("updated_at", "DATETIME")
         db.commit()
     except Exception:
+        logging.exception("Failed to ensure plan_order_info columns")
         db.rollback()
 
 def _load_order_meta(db: Session, plan_id: int) -> Dict[str, dict]:
@@ -63,6 +95,99 @@ def _load_order_meta(db: Session, plan_id: int) -> Dict[str, dict]:
         meta[oid] = dict(r)
         meta[oid]["status"] = (r.get("status") or "").lower() or "unfixed"
     return meta
+
+
+def _machine_base_id(value: str | None) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    return s.split("_", 1)[0]
+
+
+def _machine_workshop_lookup(db: Session) -> Dict[str, str]:
+    rows = db.query(DimMachine.machine_id, DimMachine.name, DimMachine.family).all()
+    out: Dict[str, str] = {}
+    for mid, name, family in rows:
+        wk = str(family or "").strip()
+        if not wk:
+            continue
+        keys = {
+            str(mid or "").strip(),
+            _machine_base_id(mid),
+            str(name or "").strip(),
+            _machine_base_id(name),
+        }
+        for key in keys:
+            if key and key not in out:
+                out[key] = wk
+    return out
+
+
+def _purge_receipt_orders(db: Session, plan_id: int) -> None:
+    """Delete previously generated receipt orders so each run recreates them."""
+    like_token = f"%{RECEIPT_ORDER_TOKEN}%"
+    db.query(ScheduleOp).filter(
+        ScheduleOp.plan_id == plan_id,
+        ScheduleOp.order_id.like(like_token),
+    ).delete(synchronize_session=False)
+    db.execute(
+        text("DELETE FROM plan_order_info WHERE plan_id=:pid AND order_id LIKE :pat"),
+        {"pid": plan_id, "pat": like_token},
+    )
+    db.commit()
+
+
+def _collect_root_orders_from_demand(
+    *,
+    plan_path: str | None,
+    plan_df: pd.DataFrame | None,
+    receipts_path: str | None,
+    reserved_order_ids: set[str],
+    fixed_order_qty: dict[str, float],
+    split_child_orders: bool,
+) -> Dict[str, dict]:
+    """Build root order map (order_id -> qty/due_date) from plan(+receipts) demand."""
+    out: Dict[str, dict] = {}
+    try:
+        source_df = plan_df.copy() if plan_df is not None else load_plan_of_sales(Path(str(plan_path or "")))
+        demand = _build_demand(source_df, reserved_order_ids=reserved_order_ids)
+        if receipts_path:
+            try:
+                rp = Path(receipts_path)
+                if rp.exists():
+                    receipts_df = load_receipts_any(rp)
+                    demand, _ = _append_receipts_demand(
+                        demand,
+                        receipts_df,
+                        split_child_orders=split_child_orders,
+                        reserved_order_ids=reserved_order_ids,
+                        fixed_order_qty=fixed_order_qty,
+                    )
+            except Exception:
+                logging.warning("Failed to load receipts for root demand map: %s", receipts_path)
+        if demand is None or demand.empty:
+            return out
+        for r in demand.itertuples(index=False):
+            base_oid = str(getattr(r, "order_id", "") or "")
+            item_id = str(getattr(r, "item_id", "") or "")
+            if not base_oid or not item_id:
+                continue
+            root_oid = f"{base_oid}:{item_id}" if split_child_orders else base_oid
+            try:
+                qty_val = float(getattr(r, "qty", 0) or 0.0)
+            except Exception:
+                qty_val = 0.0
+            due_raw = getattr(r, "due_date", None)
+            due_val = None
+            try:
+                if due_raw is not None and pd.notna(due_raw):
+                    due_val = str(pd.to_datetime(due_raw).date())
+            except Exception:
+                due_val = None
+            out[root_oid] = {"qty": qty_val, "due_date": due_val, "base_order_id": base_oid}
+    except Exception:
+        logging.warning("Failed to build root demand map from source plan")
+    return out
 
 def _recompute_plan_loads(db: Session, plan_id: int) -> int:
     ops_rows = (
@@ -108,6 +233,23 @@ def _aggregate_orders_for_plan(
     offset: int = 0,
     with_total: bool = True,
 ) -> tuple[List[dict], int]:
+    import re
+
+    def _parse_date_safe(v):
+        if v is None:
+            return None
+        try:
+            return pd.to_datetime(v).date()
+        except Exception:
+            return None
+
+    def _infer_item_from_order_id(oid: str) -> str:
+        s = str(oid or "")
+        if ":" in s:
+            return s.split(":", 1)[1]
+        base = s.split("-", 1)[0]
+        return base
+
     meta = _load_order_meta(db, plan_id)
     wk_tokens = _normalize_workshop_tokens(workshop)
     date_from_dt = None
@@ -130,9 +272,7 @@ def _aggregate_orders_for_plan(
             func.max(ScheduleOp.end_ts).label("end_ts"),
             func.max(ScheduleOp.qty).label("qty"),
             func.min(ScheduleOp.item_id).label("item_id"),
-            func.max(DimMachine.family).label("workshop"),
         )
-        .join(DimMachine, ScheduleOp.machine_id == DimMachine.machine_id, isouter=True)
         .filter(ScheduleOp.plan_id == plan_id)
         .group_by(ScheduleOp.order_id)
     )
@@ -142,25 +282,50 @@ def _aggregate_orders_for_plan(
     if order_id:
         token = f"%{order_id}%"
         q = q.filter(ScheduleOp.order_id.like(token))
-    if wk_tokens:
-        q = q.filter(func.lower(func.trim(DimMachine.family)).in_(wk_tokens))
-
     if date_from_dt:
         q = q.having(func.max(ScheduleOp.end_ts) >= datetime.combine(date_from_dt, datetime.min.time()))
     if date_to_dt:
         q = q.having(func.min(ScheduleOp.start_ts) <= datetime.combine(date_to_dt, datetime.max.time()))
 
-    total = int(q.count()) if with_total else 0
-    q = q.order_by(ScheduleOp.order_id).offset(max(0, int(offset or 0)))
-    if limit is not None and int(limit) > 0:
-        q = q.limit(int(limit))
+    rows = q.order_by(ScheduleOp.order_id).all()
+    out_all: List[dict] = []
+    order_ids = [str(r.order_id) for r in rows if r.order_id is not None]
+    workshop_by_order: Dict[str, str] = {}
+    if order_ids:
+        wk_lookup = _machine_workshop_lookup(db)
+        wk_rows = (
+            db.query(
+                ScheduleOp.order_id.label("order_id"),
+                ScheduleOp.machine_id.label("machine_id"),
+                func.count().label("op_count"),
+            )
+            .filter(ScheduleOp.plan_id == plan_id)
+            .filter(ScheduleOp.order_id.in_(order_ids))
+            .group_by(ScheduleOp.order_id, ScheduleOp.machine_id)
+            .all()
+        )
+        counts: Dict[str, Dict[str, int]] = {}
+        for wr in wk_rows:
+            oid = str(wr.order_id or "")
+            mid = str(wr.machine_id or "")
+            if not oid or not mid:
+                continue
+            wk_val = wk_lookup.get(mid) or wk_lookup.get(_machine_base_id(mid))
+            if not wk_val:
+                continue
+            c = counts.setdefault(oid, {})
+            c[wk_val] = int(c.get(wk_val, 0)) + int(getattr(wr, "op_count", 0) or 0)
+        for oid, c in counts.items():
+            if not c:
+                continue
+            workshop_by_order[oid] = sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
-    rows = q.all()
-    out: List[dict] = []
+    present_order_ids: set[str] = set()
     for r in rows:
         oid = str(r.order_id) if r.order_id is not None else ""
         if not oid:
             continue
+        present_order_ids.add(oid)
         start_ts = r.start_ts
         end_ts = r.end_ts
         start_date = start_ts.date() if start_ts else None
@@ -171,13 +336,18 @@ def _aggregate_orders_for_plan(
             except Exception:
                 end_date = end_ts.date()
         m = meta.get(oid, {})
-        workshop_val = str(r.workshop) if r.workshop is not None else None
+        workshop_val = workshop_by_order.get(oid)
         if not workshop_val and m.get("workshop"):
             workshop_val = str(m.get("workshop"))
+        if wk_tokens:
+            wk_norm = str(workshop_val or "").strip().lower()
+            wk_digits = re.sub(r"\D+", "", wk_norm)
+            if wk_norm not in wk_tokens and (not wk_digits or wk_digits not in wk_tokens):
+                continue
         qty_val = m.get("qty") if m else None
         if qty_val is None:
             qty_val = float(r.qty) if r.qty is not None else None
-        out.append(
+        out_all.append(
             {
                 "order_id": oid,
                 "item_id": str(r.item_id) if r.item_id is not None else "",
@@ -189,6 +359,58 @@ def _aggregate_orders_for_plan(
                 "due_date": m.get("due_date") if m else None,
             }
         )
+
+    # Include fixed orders without operations (e.g. top-level root orders).
+    # They are persisted in plan_order_info but absent in schedule_ops by design.
+    for oid, m in meta.items():
+        if oid in present_order_ids:
+            continue
+        status_val = (m.get("status") or "unfixed").lower()
+        if status_val != "fixed":
+            continue
+        if order_id and order_id not in oid:
+            continue
+        inferred_item = _infer_item_from_order_id(str(oid))
+        if item_id and item_id.lower() not in inferred_item.lower():
+            continue
+
+        workshop_val = str(m.get("workshop") or "")
+        if wk_tokens:
+            wk_norm = workshop_val.strip().lower()
+            wk_digits = re.sub(r"\D+", "", wk_norm)
+            if wk_norm not in wk_tokens and (not wk_digits or wk_digits not in wk_tokens):
+                continue
+
+        meta_start = _parse_date_safe(m.get("start_date"))
+        meta_end = _parse_date_safe(m.get("end_date"))
+        if date_from_dt and meta_end and meta_end < date_from_dt:
+            continue
+        if date_to_dt and meta_start and meta_start > date_to_dt:
+            continue
+        if (date_from_dt or date_to_dt) and not meta_start and not meta_end:
+            continue
+
+        out_all.append(
+            {
+                "order_id": str(oid),
+                "item_id": inferred_item,
+                "workshop": workshop_val,
+                "qty": m.get("qty"),
+                "start_date": str(meta_start) if meta_start else None,
+                "end_date": str(meta_end) if meta_end else None,
+                "status": status_val,
+                "due_date": m.get("due_date"),
+            }
+        )
+
+    out_all = sorted(out_all, key=lambda x: str(x.get("order_id") or ""))
+    total = len(out_all) if with_total else 0
+    start = max(0, int(offset or 0))
+    if limit is not None and int(limit) > 0:
+        stop = start + int(limit)
+        out = out_all[start:stop]
+    else:
+        out = out_all[start:]
     return out, total
 
 def _load_lag_map(bom_path: str | None) -> dict:
@@ -230,6 +452,26 @@ def _load_lag_map(bom_path: str | None) -> dict:
         return {
             (str(r[parent_col]), str(r[item_col])): int(r[lag_col])
             for _, r in out.iterrows()
+        }
+    except Exception:
+        return {}
+
+def _load_lag_map_from_bom_df(bom_df: pd.DataFrame | None) -> dict:
+    """Load (parent_item_id, child_item_id) -> lag_days from normalized BOM df."""
+    if bom_df is None or bom_df.empty or "lag_days" not in bom_df.columns:
+        return {}
+    try:
+        tmp = bom_df[["root_item_id", "item_id", "lag_days"]].copy()
+        tmp["root_item_id"] = tmp["root_item_id"].astype(str).str.strip()
+        tmp["item_id"] = tmp["item_id"].astype(str).str.strip()
+        tmp["lag_days"] = pd.to_numeric(tmp["lag_days"], errors="coerce").fillna(0).astype(int)
+        tmp = tmp[(tmp["root_item_id"] != "") & (tmp["root_item_id"] != tmp["item_id"])]
+        if tmp.empty:
+            return {}
+        tmp = tmp.groupby(["root_item_id", "item_id"], as_index=False)["lag_days"].max()
+        return {
+            (str(r.root_item_id), str(r.item_id)): int(r.lag_days)
+            for r in tmp.itertuples(index=False)
         }
     except Exception:
         return {}
@@ -373,6 +615,8 @@ class PlanCreate(BaseModel):
     name: str
     notes: str | None = None
     parent_plan_id: int | None = None
+    bom_version_id: int | None = None
+    sales_plan_version_id: int | None = None
 
 @router.get("", summary="List plan versions")
 def list_plans(db: Session = Depends(get_db)):
@@ -385,6 +629,8 @@ def list_plans(db: Session = Depends(get_db)):
             "status": p.status,
             "created_at": p.created_at,
             "parent_plan_id": p.parent_plan_id,
+            "bom_version_id": p.bom_version_id,
+            "sales_plan_version_id": p.sales_plan_version_id,
         }
         for p in plans
     ]
@@ -395,6 +641,8 @@ def create_plan(body: PlanCreate, db: Session = Depends(get_db)):
         name=body.name,
         notes=body.notes,
         parent_plan_id=body.parent_plan_id,
+        bom_version_id=body.bom_version_id,
+        sales_plan_version_id=body.sales_plan_version_id,
         status="draft",
     )
     db.add(plan)
@@ -407,7 +655,10 @@ class RunGreedyRequest(BaseModel):
     bom_path: str | None = None
     machines_path: str | None = None
     stock_path: str | None = None
+    receipts_path: str | None = None
     mode: str | None = None
+    bom_version_id: int | None = None
+    sales_plan_version_id: int | None = None
 
 class OrderUpdate(BaseModel):
     order_id: str
@@ -435,6 +686,7 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
     plan.status = "running"
     db.commit()
     _ensure_plan_order_table(db)
+    _purge_receipt_orders(db, plan_id)
     meta = _load_order_meta(db, plan_id)
     fixed_orders = {oid for oid, m in meta.items() if (m.get("status") or "").lower() == "fixed"}
     deleted_orders = {oid for oid, m in meta.items() if (m.get("status") or "").lower() == "deleted"}
@@ -452,11 +704,45 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
         # 1) Запуск вашего пайплайна. При необходимости пути сделайте настраиваемыми.
         # Use stock if present (default stock.xlsx or env override)
         stock_path_env = os.environ.get("SOPLANNER_STOCK_PATH", "stock.xlsx")
+        receipts_path_env = os.environ.get("SOPLANNER_RECEIPTS_PATH", "receipts.xlsx")
         plan_path = (body.plan_path if body else None) or "plan of sales.xlsx"
-        bom_path = (body.bom_path if body else None) or "BOM.xlsx"
         machines_path = (body.machines_path if body else None) or "machines.xlsx"
         stock_path = (body.stock_path if body else None) or stock_path_env
+        requested_sales_plan_version_id = (body.sales_plan_version_id if body else None) or plan.sales_plan_version_id
+        sales_plan_df = None
+        resolved_sales_plan_version_id: int | None = None
+        if requested_sales_plan_version_id is not None:
+            sales_ver = get_resolved_sales_plan_version(db, int(requested_sales_plan_version_id))
+            sales_plan_df = get_sales_plan_demand_df(db, int(sales_ver.id))
+            if sales_plan_df is None or sales_plan_df.empty:
+                raise RuntimeError(f"Sales plan version {sales_ver.id} has no rows")
+            resolved_sales_plan_version_id = int(sales_ver.id)
+        receipts_field_set = False
+        if body is not None:
+            fs = getattr(body, "model_fields_set", None)
+            if fs is None:
+                fs = getattr(body, "__fields_set__", set())
+            try:
+                receipts_field_set = "receipts_path" in fs
+            except Exception:
+                receipts_field_set = False
+        receipts_path = (body.receipts_path if body is not None else None) if receipts_field_set else receipts_path_env
         mode = (body.mode if body else None) or ""
+        root_order_seed_map = _collect_root_orders_from_demand(
+            plan_path=plan_path,
+            plan_df=sales_plan_df,
+            receipts_path=receipts_path if receipts_path else None,
+            reserved_order_ids=deleted_orders,
+            fixed_order_qty=fixed_order_qty,
+            split_child_orders=True,
+        )
+        requested_bom_version_id = (body.bom_version_id if body else None) or plan.bom_version_id
+        bom_version = get_resolved_bom_version(db, requested_bom_version_id)
+        bom_rows_df = get_version_rows_df(db, int(bom_version.id))
+        scheduler_bom_df = bom_df_to_scheduler_df(bom_rows_df)
+        if scheduler_bom_df.empty:
+            raise RuntimeError(f"BOM version {bom_version.id} is empty or invalid for scheduling")
+        article_name_map = article_name_map_from_df(bom_rows_df)
 
         # Refresh stock snapshot in DB so reports use the uploaded file
         try:
@@ -466,15 +752,18 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
 
         out_xlsx, sched_df = run_pipeline(
             plan_path,
-            bom_path,
+            None,
             machines_path,
             "schedule_out.xlsx",
             stock_path=stock_path if stock_path else None,
+            receipts_path=receipts_path if receipts_path else None,
             split_child_orders=True,
             align_roots_to_due=True,
             reserved_order_ids=deleted_orders,
             fixed_order_qty=fixed_order_qty,
             mode=mode,
+            bom_df=scheduler_bom_df,
+            plan_df=sales_plan_df,
             plan_version_id=plan.id,
             db=db,
         )
@@ -499,7 +788,7 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
         df_ops["batch_id"] = ""
         df_ops["qty"] = pd.to_numeric(df_ops.get("qty", 0), errors="coerce").fillna(0.0)
         # Сдвиг дат детей относительно зафиксированного родителя с учётом лагов из BOM
-        lag_map = _load_lag_map(bom_path)
+        lag_map = _load_lag_map_from_bom_df(scheduler_bom_df)
         df_ops = _adjust_children_dates(df_ops, meta, lag_map)
         due_map_all = {}
         if "due_date" in df_ops.columns:
@@ -514,14 +803,6 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
                 due_map_all = {str(k): v for k, v in due_map_all.items()}
             except Exception:
                 due_map_all = {}
-
-        article_name_map = {}
-        try:
-            if bom_path:
-                article_name_map = load_bom_article_name_map(Path(bom_path))
-        except Exception:
-            article_name_map = {}
-
 
         # Убираем ранее рассчитанные операции для нефикисрованных заказов
         q_del = db.query(ScheduleOp).filter(ScheduleOp.plan_id == plan.id)
@@ -656,12 +937,36 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
         # Автофикс корневых заказов (обеспечивают план продаж)
         try:
             agg_map = {r["order_id"]: r for r in agg_rows}
+            base_window_map: Dict[str, dict] = {}
+            if not df_ops.empty:
+                tmp = df_ops.copy()
+                tmp["__base_order_id"] = tmp["order_id"].astype(str).str.split(":", n=1).str[0]
+                for base_id, grp in tmp.groupby("__base_order_id"):
+                    sd = grp["_start_date"].min() if "_start_date" in grp.columns else None
+                    ed = grp["_end_date"].max() if "_end_date" in grp.columns else None
+                    base_window_map[str(base_id)] = {
+                        "start_date": str(sd) if sd is not None else None,
+                        "end_date": str(ed) if ed is not None else None,
+                    }
             roots = []
-            for oid in list(agg_map.keys()):
-                base = str(oid).split(":", 1)[0]
-                base_item = base.split("-", 1)[0] if "-" in base else base
-                if str(oid) == f"{base}:{base_item}":
-                    roots.append(agg_map[oid])
+            for root_oid, seed in root_order_seed_map.items():
+                base_id = str(seed.get("base_order_id") or str(root_oid).split(":", 1)[0])
+                agg_row = agg_map.get(str(root_oid), {})
+                win = base_window_map.get(base_id, {})
+                qty_val = agg_row.get("qty") if agg_row.get("qty") is not None else seed.get("qty")
+                due_val = agg_row.get("due_date") if agg_row.get("due_date") is not None else seed.get("due_date")
+                roots.append(
+                    {
+                        "plan_id": plan.id,
+                        "order_id": str(root_oid),
+                        "start_date": agg_row.get("start_date") or win.get("start_date"),
+                        "end_date": agg_row.get("end_date") or win.get("end_date"),
+                        "workshop": agg_row.get("workshop") or "",
+                        "qty": qty_val,
+                        "status": "fixed",
+                        "due_date": due_val,
+                    }
+                )
             if roots:
                 db.execute(
                     text("""
@@ -713,8 +1018,19 @@ def run_greedy_into_plan(plan_id: int, body: RunGreedyRequest | None = None, db:
 
         plan.origin = "greedy"
         plan.status = "ready"
+        plan.bom_version_id = int(bom_version.id)
+        if resolved_sales_plan_version_id is not None:
+            plan.sales_plan_version_id = int(resolved_sales_plan_version_id)
         db.commit()
-        return {"ok": True, "plan_id": plan.id, "ops": ops_total, "days": days, "loads": loads_count}
+        return {
+            "ok": True,
+            "plan_id": plan.id,
+            "bom_version_id": int(bom_version.id),
+            "sales_plan_version_id": int(plan.sales_plan_version_id) if plan.sales_plan_version_id is not None else None,
+            "ops": ops_total,
+            "days": days,
+            "loads": loads_count,
+        }
     except Exception:
         plan.status = "failed"
         db.commit()
@@ -1166,4 +1482,242 @@ def get_heatmap(
         "machines": machines,
         "dates": [str(d) for d in dates_sorted],
         "util": {f"{m['id']}|{d}": util.get((m["id"], d), 0.0) for m in machines for d in dates_sorted},
+    }
+
+
+def _period_bounds(period: str, anchor_date) -> tuple[datetime, datetime]:
+    p = (period or "day").lower()
+    if p == "week":
+        start_date = anchor_date - timedelta(days=anchor_date.weekday())
+        end_date = start_date + timedelta(days=7)
+    elif p == "month":
+        start_date = anchor_date.replace(day=1)
+        if start_date.month == 12:
+            end_date = start_date.replace(year=start_date.year + 1, month=1)
+        else:
+            end_date = start_date.replace(month=start_date.month + 1)
+    else:
+        start_date = anchor_date
+        end_date = start_date + timedelta(days=1)
+    return (
+        datetime.combine(start_date, datetime.min.time()),
+        datetime.combine(end_date, datetime.min.time()),
+    )
+
+
+def _overlap_seconds(start_ts: datetime | None, end_ts: datetime | None, left: datetime, right: datetime) -> int:
+    if start_ts is None or end_ts is None:
+        return 0
+    lo = max(start_ts, left)
+    hi = min(end_ts, right)
+    if hi <= lo:
+        return 0
+    return int((hi - lo).total_seconds())
+
+
+def _effective_op_interval(
+    start_ts: datetime | None,
+    end_ts: datetime | None,
+    duration_sec: int | float | None,
+) -> tuple[datetime | None, datetime | None]:
+    if start_ts is None:
+        return None, None
+    end_eff = end_ts
+    try:
+        dur = float(duration_sec or 0)
+    except Exception:
+        dur = 0.0
+    if dur > 0:
+        if end_eff is None or end_eff <= start_ts:
+            end_eff = start_ts + timedelta(seconds=dur)
+        else:
+            # Keep parity with compute_daily_loads: day-marker timestamps use duration_sec.
+            if start_ts.time() == time.min and end_eff.time() == time.min:
+                end_eff = start_ts + timedelta(seconds=dur)
+    return start_ts, end_eff
+
+
+@router.get("/{plan_id}/heatmap/cell", summary="Cell details for UI heatmap")
+def get_heatmap_cell_details(
+    plan_id: int,
+    machine_id: str = Query(..., description="Machine ID (must match schedule machine_id)"),
+    date: str = Query(..., description="Cell date in YYYY-MM-DD"),
+    period: str = Query("day", description="Aggregation period: day|week|month"),
+    limit_ops: int = Query(1000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+):
+    plan = db.get(PlanVersion, plan_id)
+    if plan is None:
+        raise HTTPException(404, "plan not found")
+
+    machine_id = str(machine_id or "").strip()
+    if not machine_id:
+        raise HTTPException(400, "machine_id is required")
+
+    try:
+        anchor_date = pd.to_datetime(date).date()
+    except Exception:
+        raise HTTPException(400, "date must be in YYYY-MM-DD format")
+
+    period = (period or "day").lower()
+    if period not in ("day", "week", "month"):
+        period = "day"
+
+    start_ts, end_ts = _period_bounds(period, anchor_date)
+
+    machine_filter = (ScheduleOp.machine_id == machine_id)
+    if "_" not in machine_id:
+        machine_filter = or_(
+            machine_filter,
+            ScheduleOp.machine_id.like(f"{machine_id}_%"),
+        )
+
+    candidate_q = (
+        db.query(ScheduleOp)
+        .filter(ScheduleOp.plan_id == plan_id)
+        .filter(machine_filter)
+        .filter(ScheduleOp.start_ts < end_ts)
+        .filter(
+            or_(
+                ScheduleOp.end_ts > start_ts,
+                func.coalesce(ScheduleOp.duration_sec, 0) > 0,
+            )
+        )
+    )
+
+    candidates = candidate_q.order_by(ScheduleOp.start_ts.asc(), ScheduleOp.op_id.asc()).all()
+    total_ops = 0
+    load_sec_by_ops = 0
+    rows: List[tuple[Any, datetime | None, datetime | None, int]] = []
+    for r in candidates:
+        start_eff, end_eff = _effective_op_interval(r.start_ts, r.end_ts, r.duration_sec)
+        overlap_sec = _overlap_seconds(start_eff, end_eff, start_ts, end_ts)
+        if overlap_sec <= 0:
+            continue
+        total_ops += 1
+        load_sec_by_ops += int(overlap_sec)
+        if len(rows) < limit_ops:
+            rows.append((r, start_eff, end_eff, int(overlap_sec)))
+
+    orders_map: Dict[str, dict] = {}
+    operations: List[dict] = []
+    for r, start_eff, end_eff, overlap_sec in rows:
+
+        oid = str(r.order_id or "")
+        if oid:
+            if oid not in orders_map:
+                orders_map[oid] = {
+                    "order_id": oid,
+                    "item_id": str(r.item_id or ""),
+                    "article_name": str(r.article_name or ""),
+                    "qty": float(r.qty or 0.0),
+                    "ops_count": 0,
+                    "duration_sec": 0,
+                    "setup_sec": 0,
+                    "window_load_sec": 0,
+                    "first_start": start_eff,
+                    "last_end": end_eff,
+                }
+            rec = orders_map[oid]
+            rec["ops_count"] = int(rec["ops_count"]) + 1
+            rec["duration_sec"] = int(rec["duration_sec"]) + int(r.duration_sec or 0)
+            rec["setup_sec"] = int(rec["setup_sec"]) + int(r.setup_sec or 0)
+            rec["window_load_sec"] = int(rec["window_load_sec"]) + int(overlap_sec)
+            if not rec.get("item_id"):
+                rec["item_id"] = str(r.item_id or "")
+            if not rec.get("article_name"):
+                rec["article_name"] = str(r.article_name or "")
+            if r.qty is not None:
+                rec["qty"] = float(r.qty)
+            if rec.get("first_start") is None or (start_eff and start_eff < rec["first_start"]):
+                rec["first_start"] = start_eff
+            if rec.get("last_end") is None or (end_eff and end_eff > rec["last_end"]):
+                rec["last_end"] = end_eff
+
+        operations.append(
+            {
+                "order_id": oid,
+                "item_id": str(r.item_id or ""),
+                "article_name": str(r.article_name or ""),
+                "qty": float(r.qty or 0.0),
+                "start_ts": start_eff,
+                "end_ts": end_eff,
+                "duration_sec": int(r.duration_sec or 0),
+                "setup_sec": int(r.setup_sec or 0),
+                "window_load_sec": int(overlap_sec),
+                "op_index": int(r.op_index) if r.op_index is not None else None,
+                "batch_id": str(r.batch_id) if r.batch_id is not None else None,
+            }
+        )
+
+    load_row = (
+        db.query(
+            func.sum(MachineLoadDaily.load_sec).label("load_sec"),
+            func.sum(MachineLoadDaily.cap_sec).label("cap_sec"),
+        )
+        .filter(MachineLoadDaily.plan_id == plan_id)
+        .filter(MachineLoadDaily.machine_id == machine_id)
+        .filter(MachineLoadDaily.work_date >= start_ts)
+        .filter(MachineLoadDaily.work_date < end_ts)
+        .one()
+    )
+    load_sec = int(load_row.load_sec or 0)
+    cap_sec = int(load_row.cap_sec or 0)
+    util = (float(load_sec) / float(cap_sec)) if cap_sec > 0 else 0.0
+
+    base_mid = machine_id.split("_", 1)[0]
+    machine_meta_row = (
+        db.query(DimMachine.machine_id, DimMachine.name, DimMachine.family)
+        .filter(
+            or_(
+                DimMachine.machine_id == machine_id,
+                DimMachine.machine_id == base_mid,
+                DimMachine.name == machine_id,
+                DimMachine.name == base_mid,
+            )
+        )
+        .first()
+    )
+    machine_name = machine_id
+    machine_workshop = None
+    if machine_meta_row:
+        machine_name = str(machine_meta_row[1] or machine_id)
+        machine_workshop = machine_meta_row[2]
+
+    orders = sorted(
+        orders_map.values(),
+        key=lambda x: (
+            x.get("first_start") or datetime.max,
+            x.get("order_id") or "",
+        ),
+    )
+    for rec in orders:
+        if rec.get("first_start") is None:
+            rec["first_start"] = None
+        if rec.get("last_end") is None:
+            rec["last_end"] = None
+
+    return {
+        "plan_id": int(plan_id),
+        "period": period,
+        "anchor_date": str(anchor_date),
+        "window_start": start_ts,
+        "window_end": end_ts,
+        "machine": {
+            "id": machine_id,
+            "name": machine_name,
+            "workshop": machine_workshop,
+        },
+        "summary": {
+            "orders": len(orders),
+            "operations": total_ops,
+            "returned_operations": len(rows),
+            "truncated": bool(total_ops > len(rows)),
+            "load_sec": int(load_sec),
+            "cap_sec": int(cap_sec),
+            "util": float(util),
+            "window_load_sec_from_ops": int(load_sec_by_ops),
+        },
+        "orders": orders,
+        "operations": operations,
     }

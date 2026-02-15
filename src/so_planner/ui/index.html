@@ -41,17 +41,18 @@
       --labels:280px; --headerh:28px; --dayw:18px; --rowh:28px;
     }
     *{ box-sizing:border-box; }
-    html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font:14px/1.4 Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial;}
+    html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font:14px/1.4 Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    body{ overflow:hidden; }
     a{ color:var(--accent); text-decoration:none; }
-    .topbar{ display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border-weak); background:var(--topbar); position:sticky; top:0; z-index:8;}
+    .topbar{ display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border-weak); background:var(--topbar); position:sticky; top:0; z-index:8; overflow-x:auto; overflow-y:hidden; white-space:nowrap; }
     .topbar h1{ font-size:16px; margin:0; }
-    .tabs{ display:flex; gap:8px; }
+    .tabs{ display:flex; gap:8px; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; max-width:100%; scrollbar-width:thin; }
     .tabbtn{ padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; }
     .tabbtn.active{ border-color:var(--accent); color:var(--text); background:var(--panel); }
-    .page{ display:none; padding:16px; } .page.active{ display:block; }
-    .card{ background:var(--panel); border:1px solid var(--border-weak); border-radius:12px; padding:14px; margin-bottom:12px; }
+    .page{ display:none; padding:16px; height:calc(100vh - 66px); overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable; } .page.active{ display:block; }
+    .card{ background:var(--panel); border:1px solid var(--border-weak); border-radius:12px; padding:14px; margin-bottom:12px; min-width:0; }
     .card h3{ margin:0 0 10px 0; font-size:15px; }
-    .row{ display:flex; gap:12px; flex-wrap:wrap; } .col{ flex:1 1 320px; }
+    .row{ display:flex; gap:12px; flex-wrap:wrap; } .col{ flex:1 1 320px; min-width:0; }
     .btn{ border:1px solid var(--border); background:var(--surface); color:var(--text); padding:8px 12px; border-radius:8px; cursor:pointer; }
     .btn:hover{ border-color: var(--border-strong); } .btn.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-text); }
     .btn.danger{ background:var(--danger-bg); border-color:var(--danger-border); color:var(--danger-text); }
@@ -60,14 +61,53 @@
     input[type=text], input[type=number], input[type=date], input[type=file]{ width:100%; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text); }
     select{ background:var(--surface) !important; color:var(--text) !important; border:1px solid var(--border) !important; border-radius:8px; padding:6px 8px; }
     .kv{ display:grid; grid-template-columns: 180px 1fr; gap:6px 10px; font-size:13px; } .kv div{ padding:2px 0; }
-    .table-wrap{ overflow:auto; border:1px solid var(--border-weak); border-radius:10px; }
+    .opt-summary-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 10px; }
+    .opt-chip{ border:1px solid var(--border); border-radius:999px; padding:4px 10px; font-size:12px; background:var(--surface); color:var(--text); }
+    .opt-chip.good{ border-color:rgba(52,211,153,.55); color:var(--ok); }
+    .opt-chip.warn{ border-color:rgba(249,115,22,.5); color:#fdba74; }
+    .opt-chip.bad{ border-color:rgba(248,113,113,.55); color:#fca5a5; }
+    table.opt-kpi-table{ width:100%; border-collapse:collapse; font-size:12px; }
+    table.opt-kpi-table th, table.opt-kpi-table td{ border-bottom:1px solid var(--border-weak); padding:6px 8px; text-align:left; vertical-align:middle; }
+    table.opt-kpi-table th{ color:var(--muted); font-weight:600; background:var(--header-bg); }
+    table.opt-kpi-table td.num{ text-align:right; font-variant-numeric: tabular-nums; }
+    .opt-delta.good{ color:var(--ok); }
+    .opt-delta.bad{ color:#fca5a5; }
+    .opt-delta.flat{ color:var(--muted); }
+    .opt-section-title{ margin:10px 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+    .opt-unresolved{ margin:0; padding-left:18px; font-size:12px; color:var(--text); }
+    .opt-unresolved li{ margin:4px 0; }
+    .opt-unresolved .reason{ color:var(--muted); }
+    .table-wrap{ max-width:100%; overflow-x:auto; overflow-y:auto; border:1px solid var(--border-weak); border-radius:10px; }
+    .table-wrap > table,
+    .table-wrap > div > table,
+    .table-wrap.hscroll > table{ width:max-content; min-width:100%; }
     table{ border-collapse:collapse; width:100%; font-size:13px; } th,td{ padding:6px 8px; border-bottom:1px solid var(--border-weak); white-space:nowrap; }
     table thead th{ position:sticky; top:0; background:var(--header-bg); z-index:1; }
     table tbody th{ background:var(--surface); text-align:left; position:static; }
+    td.sales-cell.selected-cell{ box-shadow: inset 0 0 0 2px var(--accent); background: rgba(96,165,250,.16); }
+    td.sales-cell.anchor-cell{ box-shadow: inset 0 0 0 2px var(--ok); }
+    #salesMatrixWrap{ max-height:calc(100vh - 300px); overflow-y:scroll; overflow-x:auto; }
+    #salesMatrixTable{ border-collapse:separate; border-spacing:0; table-layout:fixed; width:max-content !important; min-width:max-content !important; }
+    #salesMatrixTable th, #salesMatrixTable td{ border-right:1px solid var(--border-weak); border-bottom:1px solid var(--border-weak); padding:0; width:96px; min-width:96px; max-width:96px; }
+    #salesMatrixTable th{ background:var(--header-bg); z-index:3; }
+    #salesMatrixTable td{ background:var(--surface); }
+    #salesMatrixTable input{ width:100%; min-width:0; border:0; border-radius:0; background:transparent; padding:6px 8px; color:var(--text); }
+    #salesMatrixTable td.fixed-col input{ min-width:140px; }
+    #salesMatrixTable th:nth-child(1), #salesMatrixTable td:nth-child(1){ position:sticky; left:0; min-width:150px; width:150px; max-width:150px; z-index:4; background:var(--panel); }
+    #salesMatrixTable th:nth-child(2), #salesMatrixTable td:nth-child(2){ position:sticky; left:150px; min-width:240px; width:240px; max-width:240px; z-index:4; background:var(--panel); }
+    #salesMatrixTable th:nth-child(3), #salesMatrixTable td:nth-child(3){ position:sticky; left:390px; min-width:170px; width:170px; max-width:170px; z-index:4; background:var(--panel); }
+    #salesMatrixTable thead th:nth-child(1), #salesMatrixTable thead th:nth-child(2), #salesMatrixTable thead th:nth-child(3){ z-index:5; background:var(--header-bg); }
     table.coverage-table tbody tr.row-receipt{ background: rgba(52, 211, 153, 0.12); }
     table.coverage-table tbody tr.row-demand{ background: rgba(249, 115, 22, 0.12); }
     table.coverage-table tbody tr.row-stock{ background: rgba(96, 165, 250, 0.12); }
     table.coverage-table tbody tr:hover{ background: rgba(255,255,255,0.06); }
+    table.bom-diff-table tbody tr.diff-added{ background: rgba(52, 211, 153, 0.18); }
+    table.bom-diff-table tbody tr.diff-removed{ background: rgba(248, 113, 113, 0.18); }
+    table.bom-diff-table tbody tr.diff-changed{ background: rgba(251, 191, 36, 0.18); }
+    table.bom-diff-table tbody tr.diff-structure{ background: rgba(167, 139, 250, 0.20); }
+    table.bom-diff-table tbody tr.sev-high td{ box-shadow: inset 0 0 0 9999px rgba(220, 38, 38, 0.08); }
+    table.bom-diff-table tbody tr.sev-medium td{ box-shadow: inset 0 0 0 9999px rgba(245, 158, 11, 0.07); }
+    table.bom-diff-table tbody tr:hover{ background: rgba(255,255,255,0.08); }
     table#ordersTable th{ text-align:center; }
     .log{ background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px; height:220px; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
     .log .ok{ color:var(--ok); } .log .err{ color:var(--danger-text); } .mini{ color:var(--muted); font-size:12px; }
@@ -105,6 +145,15 @@
     table.heatmap-table td .hm-val{ font-weight:600; color:var(--text); display:block; }
     table.heatmap-table td.name-cell{ text-align:left; font-weight:600; background:var(--panel); min-width:140px; }
     table.heatmap-table td.shop-cell{ text-align:left; background:var(--panel); min-width:120px; }
+    table.heatmap-table.hm-main-table,
+    table.heatmap-table.hm-ops-table{ width:max-content; min-width:100%; }
+    table.heatmap-table td.hm-cell{ cursor:pointer; position:relative; }
+    table.heatmap-table td.hm-cell:hover{ box-shadow: inset 0 0 0 1px var(--accent); }
+    table.heatmap-table td.hm-cell.selected{ box-shadow: inset 0 0 0 2px var(--accent); }
+    .hm-meta{ margin:8px 0; }
+    .hm-detail-title{ margin:10px 0 6px; font-size:13px; color:var(--muted); }
+    .hm-detail-wrap{ max-width:100%; max-height:320px; overflow:auto; border:1px solid var(--border-weak); border-radius:10px; }
+    .hm-detail-wrap > table{ width:max-content; min-width:100%; }
     .bar.highlight{ box-shadow:0 0 0 2px var(--accent); border-color:var(--accent); }
     .g-row.highlight-row{ background:var(--highlight-row); }
     #edgesLayer path.highlight{ stroke:var(--accent); stroke-width:2; opacity:1; }
@@ -201,8 +250,10 @@
         <div class="tabs">
       <button class="tabbtn active" data-tab="files" onclick="window.activateTab && window.activateTab('files', this)">Файлы</button>
       <button class="tabbtn" data-tab="plans" onclick="window.activateTab && window.activateTab('plans', this)">Планы</button>
+      <button class="tabbtn" data-tab="sales" onclick="window.activateTab && window.activateTab('sales', this)">План продаж</button>
       <button class="tabbtn" data-tab="orders" onclick="window.activateTab && window.activateTab('orders', this)">Заказы</button>
       <button class="tabbtn" data-tab="product" onclick="window.activateTab && window.activateTab('product', this)">Продукт</button>
+      <button class="tabbtn" data-tab="bom" onclick="window.activateTab && window.activateTab('bom', this)">BOM</button>
       <button class="tabbtn" data-tab="reports" onclick="window.activateTab && window.activateTab('reports', this)">Отчёты</button>
       <button class="tabbtn" data-tab="evaluation" onclick="window.activateTab && window.activateTab('evaluation', this)">Оценка</button>
       <button class="tabbtn" data-tab="transfer" onclick="window.activateTab && window.activateTab('transfer', this)">Дефицит к перемещению</button>
@@ -265,6 +316,7 @@
           </div>
           <div class="row" style="margin-top:6px;">
             <div class="col"><label>Склад (.xlsx, опционально)</label><input id="fStock" type="file" accept=".xlsx,.xls" /></div>
+            <div class="col"><label>Исходящие поступления (.xlsx, опционально)</label><input id="fReceipts" type="file" accept=".xlsx,.xls" /></div>
           </div>
           <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
             <button class="btn" id="btnValidate">Проверить</button>
@@ -329,8 +381,104 @@
 
     <div class="card">
       <h3>Greedy для выбранного плана</h3>
-      <div class="row">
-        <button class="btn primary" id="btnRunGreedyPlan">Запустить Greedy</button>
+      <div class="row" style="gap:8px; align-items:flex-end;">
+        <div class="col" style="flex:0 0 300px;">
+          <label>BOM версия для расчёта</label>
+          <select id="planBomVersionSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+        </div>
+        <div class="col" style="flex:0 0 320px;">
+          <label>План продаж (версия)</label>
+          <select id="planSalesVersionSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <button class="btn primary" id="btnRunGreedyPlan">Запустить Greedy</button>
+        </div>
+        <div class="col" style="flex:1 1 auto;">
+          <div id="planBomMeta" class="mini"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="sales" class="page">
+    <div class="card">
+      <h3>Версии плана продаж</h3>
+      <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="col" style="flex:0 0 320px;">
+          <label>Версия</label>
+          <select id="salesVersionSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn" id="btnSalesRefresh">Обновить</button>
+        </div>
+        <div class="col" style="flex:1 1 260px;">
+          <label>Новая версия</label>
+          <input id="salesNewName" type="text" placeholder="Например: План продаж март 2026" />
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn primary" id="btnSalesCreate">Создать</button>
+        </div>
+      </div>
+      <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap; margin-top:8px;">
+        <div class="col" style="flex:1 1 320px;">
+          <label>Импорт в выбранную версию (формат как plan of sales)</label>
+          <input id="salesImportFile" type="file" accept=".xlsx,.xls" />
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn" id="btnSalesImport">Импортировать</button>
+        </div>
+        <div class="col" style="flex:1 1 auto;">
+          <div id="salesVersionMeta" class="mini"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Матрица плана продаж</h3>
+      <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="col" style="flex:0 0 auto;">
+          <button class="btn" id="btnSalesLoad">Загрузить</button>
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <button class="btn primary" id="btnSalesSave">Сохранить</button>
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <button class="btn" id="btnSalesAddRows">+100 строк</button>
+        </div>
+        <div class="col" style="flex:0 0 180px;">
+          <label>Формат</label>
+          <select id="salesViewGranularity" style="width:100%;">
+            <option value="day" selected>День</option>
+            <option value="week">Неделя</option>
+            <option value="month">Месяц</option>
+            <option value="year">Год</option>
+          </select>
+        </div>
+        <div class="col" style="flex:0 0 170px;">
+          <label>Горизонт с</label>
+          <input id="salesHorizonFrom" type="date" />
+        </div>
+        <div class="col" style="flex:0 0 170px;">
+          <label>Горизонт по</label>
+          <input id="salesHorizonTo" type="date" />
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn" id="btnSalesApplyHorizon">Применить</button>
+        </div>
+        <div class="col" style="flex:0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="btn" id="btnSalesResetHorizon">Сбросить</button>
+        </div>
+      </div>
+      <div id="salesMatrixWrap" class="table-wrap hscroll" style="margin-top:8px;">
+        <table id="salesMatrixTable"></table>
+      </div>
+      <div class="mini" id="salesSaveMeta" style="margin-top:6px;">
+        Сохраняются только целые qty &gt; 0. Артикулы вне активного BOM блокируют сохранение.
       </div>
     </div>
   </section>
@@ -396,6 +544,139 @@
     <div class="card">
       <h3>Покрытие (потребности и поступления)</h3>
       <div class="table-wrap"><table id="prodCoverageTable" class="coverage-table"></table></div>
+    </div>
+  </section>
+
+  <section id="bom" class="page">
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>BOM версии</h3>
+          <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="col" style="flex:0 0 320px;">
+              <label>Версия BOM</label>
+              <select id="bomVersionSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+            </div>
+            <div class="col" style="flex:0 0 auto; display:flex; gap:8px; align-items:flex-end;">
+              <button class="btn" id="btnBomRefresh">Обновить</button>
+              <button class="btn" id="btnBomActivate">Сделать активной</button>
+            </div>
+            <div class="col" style="flex:1 1 auto;">
+              <div id="bomVersionMeta" class="mini"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Импорт BOM из Excel</h3>
+          <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="col" style="flex:1 1 320px;">
+              <label>Файл BOM (.xlsx)</label>
+              <input id="bomImportFile" type="file" accept=".xlsx,.xls" />
+            </div>
+            <div class="col" style="flex:1 1 260px;">
+              <label>Название версии</label>
+              <input id="bomImportName" type="text" placeholder="Например: BOM февраль 2026" />
+            </div>
+            <div class="col" style="flex:0 0 auto;">
+              <label><input id="bomImportActivate" type="checkbox" checked /> Сделать активной</label>
+            </div>
+            <div class="col" style="flex:0 0 auto;">
+              <button class="btn primary" id="btnBomImport">Загрузить BOM</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Отчёт BOM (таблица из БД)</h3>
+          <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="col" style="flex:1 1 220px;">
+              <label>item_id</label>
+              <input id="bomFilterItem" type="text" />
+            </div>
+            <div class="col" style="flex:1 1 220px;">
+              <label>component_id</label>
+              <input id="bomFilterComponent" type="text" />
+            </div>
+            <div class="col" style="flex:1 1 220px;">
+              <label>machine_family</label>
+              <input id="bomFilterMachine" type="text" />
+            </div>
+            <div class="col" style="flex:0 0 140px;">
+              <label>Лимит</label>
+              <input id="bomFilterLimit" type="number" min="1" max="5000" value="1000" />
+            </div>
+            <div class="col" style="flex:0 0 auto;">
+              <button class="btn primary" id="btnBomLoad">Показать</button>
+            </div>
+          </div>
+          <div class="table-wrap hscroll" style="margin-top:8px;">
+            <table id="bomReportTable"></table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Diff BOM версий</h3>
+          <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap;">
+            <div class="col" style="flex:1 1 280px;">
+              <label>Версия FROM</label>
+              <select id="bomDiffFromSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+            </div>
+            <div class="col" style="flex:1 1 280px;">
+              <label>Версия TO</label>
+              <select id="bomDiffToSel" style="width:100%; padding:6px 8px; border-radius:8px; background:var(--surface); color:var(--text); border:1px solid var(--border);"></select>
+            </div>
+            <div class="col" style="flex:0 0 140px;">
+              <label>Лимит</label>
+              <input id="bomDiffLimit" type="number" min="1" max="10000" value="2000" />
+            </div>
+            <div class="col" style="flex:0 0 auto;">
+              <button class="btn primary" id="btnBomDiff">Сравнить</button>
+            </div>
+          </div>
+          <div class="row" style="gap:8px; align-items:flex-end; flex-wrap:wrap; margin-top:8px;">
+            <div class="col" style="flex:1 1 560px;">
+              <label>Критерии</label>
+              <div style="display:flex; gap:10px; flex-wrap:wrap; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--surface);">
+                <label><input id="bomCritQty" type="checkbox" checked /> Норма qty_per</label>
+                <label><input id="bomCritLoss" type="checkbox" checked /> Коэффициент loss</label>
+                <label><input id="bomCritProc" type="checkbox" checked /> Норма времени proc_time_std</label>
+                <label><input id="bomCritNorm" type="checkbox" checked /> Комбинированная норма</label>
+                <label><input id="bomCritMult" type="checkbox" checked /> Кратность</label>
+                <label><input id="bomCritArticle" type="checkbox" checked /> Наименование</label>
+                <label><input id="bomCritRows" type="checkbox" checked /> Дубликаты/кратность строк</label>
+                <label><input id="bomCritWorkshop" type="checkbox" checked /> Цех workshop</label>
+                <label><input id="bomCritTimePerUnit" type="checkbox" checked /> time_per_unit</label>
+                <label><input id="bomCritMachineTime" type="checkbox" checked /> machine_time</label>
+                <label><input id="bomCritSettingTime" type="checkbox" checked /> setting_time</label>
+                <label><input id="bomCritSourceStep" type="checkbox" checked /> source_step</label>
+                <label><input id="bomCritSetupMinutes" type="checkbox" checked /> setup_minutes</label>
+                <label><input id="bomCritLagTime" type="checkbox" checked /> lag_time</label>
+              </div>
+            </div>
+            <div class="col" style="flex:0 0 170px;">
+              <label>Порог qty, %</label>
+              <input id="bomThrQty" type="number" min="0" step="0.01" value="0" />
+            </div>
+            <div class="col" style="flex:0 0 170px;">
+              <label>Порог proc, %</label>
+              <input id="bomThrProc" type="number" min="0" step="0.01" value="0" />
+            </div>
+            <div class="col" style="flex:0 0 170px;">
+              <label>Порог нормы, %</label>
+              <input id="bomThrNorm" type="number" min="0" step="0.01" value="0" />
+            </div>
+            <div class="col" style="flex:0 0 200px;">
+              <label>Порог кратности (dev, %)</label>
+              <input id="bomThrMult" type="number" min="0" step="0.01" value="1" />
+            </div>
+          </div>
+          <div id="bomDiffMeta" class="mini" style="margin-top:8px;"></div>
+          <div class="table-wrap hscroll" style="margin-top:8px;">
+            <table id="bomDiffTable"></table>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -651,6 +932,21 @@
     </div>
   </div>
 
+  <div id="hmCellModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="hmCellTitle" style="width:980px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="hmCellTitle">Детали тепловой карты</h3>
+        <button class="btn" id="btnHMCellClose">Закрыть</button>
+      </div>
+      <div id="hmCellMeta" class="mini hm-meta">Выберите ячейку</div>
+      <div class="hm-detail-title">Операции</div>
+      <div class="hm-detail-wrap">
+        <table id="hmCellOpsTable" class="heatmap-table hm-ops-table"></table>
+      </div>
+      <div id="hmCellNote" class="modal-note"></div>
+    </div>
+  </div>
+
   <script>
     const el = (id) => document.getElementById(id);
     const toast = (msg, ok=false) => {
@@ -685,6 +981,104 @@
           const td=document.createElement('td');
           let v=r[c]; if(v===undefined||v===null) v='';
           td.textContent=String(v);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(thead);
+      tbl.appendChild(tbody);
+    }
+    function _bomDiffSelectedCriteria(){
+      const map = [
+        ['bomCritQty', 'qty_per'],
+        ['bomCritLoss', 'loss'],
+        ['bomCritProc', 'proc_time_std'],
+        ['bomCritNorm', 'norm_combined'],
+        ['bomCritMult', 'multiplicity'],
+        ['bomCritArticle', 'article_name'],
+        ['bomCritRows', 'row_count'],
+        ['bomCritWorkshop', 'workshop'],
+        ['bomCritTimePerUnit', 'time_per_unit'],
+        ['bomCritMachineTime', 'machine_time'],
+        ['bomCritSettingTime', 'setting_time'],
+        ['bomCritSourceStep', 'source_step'],
+        ['bomCritSetupMinutes', 'setup_minutes'],
+        ['bomCritLagTime', 'lag_time'],
+      ];
+      return map
+        .filter(([id])=> !!document.getElementById(id)?.checked)
+        .map(([, key])=> key);
+    }
+    function _bomDiffNumericInput(id, fallback){
+      const raw = parseFloat(String(document.getElementById(id)?.value ?? fallback));
+      if(!Number.isFinite(raw)) return fallback;
+      return Math.max(0, raw);
+    }
+    function _formatBomDiffValue(col, value){
+      if(value === undefined || value === null) return '';
+      if(Array.isArray(value)) return value.join(', ');
+      if(typeof value === 'number'){
+        if(col.endsWith('_pct') || col.endsWith('_dev_pct')){
+          return `${value.toFixed(2)}%`;
+        }
+        if(Number.isInteger(value)) return String(value);
+        if(Math.abs(value) >= 100) return value.toFixed(2);
+        if(Math.abs(value) >= 1) return value.toFixed(4).replace(/\.?0+$/, '');
+        return value.toFixed(6).replace(/\.?0+$/, '');
+      }
+      return String(value);
+    }
+    function renderBomDiffTable(tbl, rows){
+      if(!tbl) return;
+      const data = Array.isArray(rows) ? rows : [];
+      tbl.innerHTML = '';
+      tbl.classList.add('bom-diff-table');
+      if(!data.length){
+        tbl.innerHTML = '<thead><tr><th>Нет изменений</th></tr></thead>';
+        return;
+      }
+      const preferredCols = [
+        'change_type','severity','reasons',
+        'item_id','component_id','routing_step','machine_family',
+        'row_count_before','row_count_after',
+        'article_name_before','article_name_after',
+        'workshop_before','workshop_after',
+        'source_step_before','source_step_after',
+        'qty_per_before','qty_per_after','qty_per_delta_abs','qty_per_delta_pct',
+        'loss_before','loss_after','loss_delta_abs','loss_delta_pct',
+        'qty_ratio','qty_ratio_nearest_int','qty_ratio_dev_pct',
+        'proc_time_std_before','proc_time_std_after','proc_time_std_delta_abs','proc_time_std_delta_pct',
+        'time_per_unit_before','time_per_unit_after','time_per_unit_delta_abs','time_per_unit_delta_pct',
+        'machine_time_before','machine_time_after','machine_time_delta_abs','machine_time_delta_pct',
+        'setting_time_before','setting_time_after','setting_time_delta_abs','setting_time_delta_pct',
+        'setup_minutes_before','setup_minutes_after','setup_minutes_delta_abs','setup_minutes_delta_pct',
+        'lag_time_before','lag_time_after','lag_time_delta_abs','lag_time_delta_pct',
+        'combined_norm_before','combined_norm_after','combined_norm_delta_abs','combined_norm_delta_pct',
+      ];
+      const extraCols = [...data.reduce((s, r)=>{ Object.keys(r || {}).forEach(k=>s.add(k)); return s; }, new Set())]
+        .filter((k)=> !preferredCols.includes(k));
+      const cols = preferredCols.filter((k)=> data.some((r)=> Object.prototype.hasOwnProperty.call(r || {}, k))).concat(extraCols);
+      const thead = document.createElement('thead');
+      const trh = document.createElement('tr');
+      cols.forEach((c)=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
+      thead.appendChild(trh);
+      const tbody = document.createElement('tbody');
+      data.forEach((r)=>{
+        const tr = document.createElement('tr');
+        const ct = String(r?.change_type || '');
+        if(ct === 'added') tr.classList.add('diff-added');
+        else if(ct === 'removed') tr.classList.add('diff-removed');
+        else if(ct === 'changed_structure') tr.classList.add('diff-structure');
+        else tr.classList.add('diff-changed');
+        const sev = String(r?.severity || '').toLowerCase();
+        if(sev === 'high') tr.classList.add('sev-high');
+        else if(sev === 'medium') tr.classList.add('sev-medium');
+        if(Array.isArray(r?.reasons) && r.reasons.length){
+          tr.title = `Причины: ${r.reasons.join(', ')}`;
+        }
+        cols.forEach((c)=>{
+          const td = document.createElement('td');
+          td.textContent = _formatBomDiffValue(c, r ? r[c] : '');
           tr.appendChild(td);
         });
         tbody.appendChild(tr);
@@ -741,6 +1135,37 @@
       try { return await fn(); }
       finally { btn.disabled = false; btn.textContent = prev; btn.classList.remove('loading'); }
     }
+    const apiUrl = (path)=>{
+      const p = String(path || '');
+      const normalized = p.startsWith('/') ? p : `/${p}`;
+      const origin = (window.location && window.location.origin) ? window.location.origin : '';
+      if(origin && origin !== 'null'){
+        return normalized;
+      }
+      return `http://127.0.0.1:8000${normalized}`;
+    };
+    const rememberUploadedPaths = (paths)=>{
+      const p = (paths && typeof paths === 'object') ? paths : {};
+      try{ window.lastUploadedPaths = p; }catch(e){}
+      try{ localStorage.setItem('lastUploadedPaths', JSON.stringify(p)); }catch(e){}
+    };
+    const getLastUploadedPaths = ()=>{
+      try{
+        if(window.lastUploadedPaths && typeof window.lastUploadedPaths === 'object'){
+          return window.lastUploadedPaths;
+        }
+      }catch(e){}
+      try{
+        const raw = localStorage.getItem('lastUploadedPaths');
+        if(!raw) return {};
+        const p = JSON.parse(raw);
+        if(p && typeof p === 'object'){
+          try{ window.lastUploadedPaths = p; }catch(e){}
+          return p;
+        }
+      }catch(e){}
+      return {};
+    };
     const setFilePlanStatus = (txt)=>{ const box = el("filePlanStatus"); if(box) box.textContent = txt || ""; };
 
     // Sync vertical scroll between labels and timeline to act as one list
@@ -823,6 +1248,11 @@
           if(window.ensurePlanSelectorsLoadedOnce) window.ensurePlanSelectorsLoadedOnce();
         }catch(e){}
       }
+      if(tid==='sales'){
+        try{
+          if(window.populateSalesPlanVersions) window.populateSalesPlanVersions();
+        }catch(e){}
+      }
       if(tid==='product'){
         try{
           if(window.ensurePlanSelectorsLoadedOnce) window.ensurePlanSelectorsLoadedOnce();
@@ -838,6 +1268,11 @@
       if(tid==='transfer'){
         try{
           if(window.ensurePlanSelectorsLoadedOnce) window.ensurePlanSelectorsLoadedOnce();
+        }catch(e){}
+      }
+      if(tid==='bom'){
+        try{
+          if(typeof window.populateBomVersionSelectors === 'function') window.populateBomVersionSelectors();
         }catch(e){}
       }
     };
@@ -871,11 +1306,26 @@
     })();
 
     // Files: validate/upload
+    try{
+      const remembered = getLastUploadedPaths();
+      if(remembered && Object.keys(remembered).length){
+        el('activePathsKV').innerHTML = '';
+        Object.entries(remembered).forEach(([k,v])=>{ el('activePathsKV').innerHTML += `<div>${k}</div><div>${v}</div>`; });
+      }
+    }catch(e){}
     el('btnValidate').addEventListener('click', async (evt)=>{
       const btn = evt.currentTarget;
       await withLoading(btn, async ()=>{
         try {
-          const j = await fetch('/ingest/validate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ machines:'machines.xlsx', bom:'BOM.xlsx', plan:'plan of sales.xlsx' })}).then(r=>r.json());
+          const active = getLastUploadedPaths();
+          const payload = {
+            machines: active.machines ?? 'machines.xlsx',
+            bom: active.bom ?? 'BOM.xlsx',
+            plan: active.plan ?? 'plan of sales.xlsx',
+            stock: active.stock ?? 'stock.xlsx',
+            receipts: active.receipts ?? 'receipts.xlsx',
+          };
+          const j = await fetch(apiUrl('/ingest/validate'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).then(r=>r.json());
           el('activePathsKV').innerHTML='';
           Object.entries(j||{}).forEach(([k,v])=>{ el('activePathsKV').innerHTML+=`<div>${k}</div><div>${v}</div>`; });
           toast('Проверка: ок', true);
@@ -885,12 +1335,18 @@
 el('btnUpload').addEventListener('click', async (evt)=>{
       const btn = evt.currentTarget;
       await withLoading(btn, async ()=>{
-        const fm=el('fMachines').files[0], fb=el('fBOM').files[0], fp=el('fPlan').files[0];
+        const fm=el('fMachines').files[0], fb=el('fBOM').files[0], fp=el('fPlan').files[0], fs=el('fStock').files[0], fr=el('fReceipts').files[0];
         if(!fm||!fb||!fp){ toast('Загрузите все три файла: Оборудование, BOM, План продаж', false); return; }
         try {
           const fd=new FormData(); fd.append('machines', fm); fd.append('bom', fb); fd.append('plan', fp);
-          const j = await fetch('/upload/ingest',{method:'POST', body:fd}).then(r=>r.json());
-          if(j.active_paths){ el('activePathsKV').innerHTML=''; Object.entries(j.active_paths).forEach(([k,v])=>{ el('activePathsKV').innerHTML+=`<div>${k}</div><div>${v}</div>`; }); try{ window.lastUploadedPaths = j.active_paths; }catch(e){} }
+          if(fs) fd.append('stock', fs);
+          if(fr) fd.append('receipts', fr);
+          const j = await fetch(apiUrl('/upload/ingest'),{method:'POST', body:fd}).then(r=>r.json());
+          if(j.active_paths){
+            el('activePathsKV').innerHTML='';
+            Object.entries(j.active_paths).forEach(([k,v])=>{ el('activePathsKV').innerHTML+=`<div>${k}</div><div>${v}</div>`; });
+            rememberUploadedPaths(j.active_paths);
+          }
           toast('Загрузка: ок', true);
         } catch(e){ toast('Ошибка загрузки: '+(e.detail?.msg||e), false); }
       }, 'Загружаю…');
@@ -916,7 +1372,11 @@ el('btnUpload').addEventListener('click', async (evt)=>{
     // Plans
     const API = {
       plans:()=>fetch('/plans').then(r=>r.json()),
-      runGreedy:(id)=>fetch(`/plans/${id}/run-greedy`,{method:'POST'}).then(r=>r.json()),
+      runGreedy:(id, payload)=>fetch(`/plans/${id}/run-greedy`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload || {})
+      }).then(r=>r.json()),
     };
     function renderPlans(){
       const sel = el('plansSelect');
@@ -937,7 +1397,17 @@ el('btnUpload').addEventListener('click', async (evt)=>{
       const meta = el('selInfo');
       const current = state.plans.find(p=>p.id===state.selectedId);
       if(meta){
-        meta.textContent = current ? `#${current.id} · ${current.name} · ${current.origin} · ${current.status}` : 'Не выбран план';
+        const bomTxt = (current && current.bom_version_id) ? ` · BOM #${current.bom_version_id}` : '';
+        const salesTxt = (current && current.sales_plan_version_id) ? ` · Sales #${current.sales_plan_version_id}` : '';
+        meta.textContent = current ? `#${current.id} · ${current.name} · ${current.origin} · ${current.status}${bomTxt}${salesTxt}` : 'Не выбран план';
+      }
+      const bomSel = el('planBomVersionSel');
+      if(current && bomSel && current.bom_version_id && [...bomSel.options].some(o=>o.value===String(current.bom_version_id))){
+        bomSel.value = String(current.bom_version_id);
+      }
+      const salesSel = el('planSalesVersionSel');
+      if(current && salesSel && current.sales_plan_version_id && [...salesSel.options].some(o=>o.value===String(current.sales_plan_version_id))){
+        salesSel.value = String(current.sales_plan_version_id);
       }
       sel.onchange = ()=> {
         const v = sel.value ? parseInt(sel.value,10) : null;
@@ -1173,7 +1643,145 @@ el('btnUpload').addEventListener('click', async (evt)=>{
 <script>
   el('btnCreate').addEventListener('click', async (evt)=>{ const btn=evt.currentTarget; await withLoading(btn, async ()=>{ const name=el('planName').value.trim(); if(!name){ toast('Введите название плана', false); return;} const j=await fetch('/plans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}).then(r=>r.json()); state.selectedId=j.id; try{ localStorage.setItem('selectedPlanId', String(j.id)); }catch(e){} if(window.refreshPlanData) await window.refreshPlanData(); await loadHeatmap(); }, 'Создаю…'); });
   el('btnRefreshPlans').addEventListener('click', async (evt)=>{ const btn = evt.currentTarget; await withLoading(btn, async ()=>{ if(window.refreshPlanData) await window.refreshPlanData(); else await reloadPlans(); }, 'Обновляю…'); });
-  el('btnRunGreedyPlan').addEventListener('click', async (evt)=>{ const btn=evt.currentTarget; await withLoading(btn, async ()=>{ if(!state.selectedId){ toast('Не выбран план', false); return;} try{ const j=await API.runGreedy(state.selectedId); toast(`Greedy: ок (операций=${j.ops}, дней=${j.days})`, true); await loadHeatmap(); if(window.refreshPlanData) await window.refreshPlanData(); else await reloadPlans(); }catch(e){ toast('Greedy: ошибка', false);} }, 'Запускаю…'); });
+  const salesSel = document.getElementById('salesVersionSel');
+  if(salesSel){
+    salesSel.addEventListener('change', ()=>{
+      const v = salesSel.value ? parseInt(salesSel.value,10) : null;
+      window.salesPlanState.versionId = Number.isFinite(v) ? v : null;
+      window.salesPlanState.rawDates = [];
+      window.salesPlanState.rows = [];
+      window.salesPlanState.horizonFrom = '';
+      window.salesPlanState.horizonTo = '';
+      window.salesPlanState.selection = null;
+      window.salesPlanState.activeCell = null;
+      renderSalesMatrix();
+    });
+  }
+  const btnSalesRefresh = document.getElementById('btnSalesRefresh');
+  if(btnSalesRefresh){
+    btnSalesRefresh.addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{ await populateSalesPlanVersions(); }, 'Обновляю…');
+    });
+  }
+  const btnSalesCreate = document.getElementById('btnSalesCreate');
+  if(btnSalesCreate){
+    btnSalesCreate.addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{
+        const name = (document.getElementById('salesNewName')?.value || '').trim();
+        if(!name){ toast('Введите название версии плана продаж', false); return; }
+        const res = await fetch('/sales-plans/versions', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({name}),
+        }).then(r=>r.json());
+        if(res && res.detail) throw new Error(res.detail.msg || 'Ошибка создания версии');
+        const vid = res?.version?.id;
+        await populateSalesPlanVersions(vid);
+        await loadSalesMatrix();
+      }, 'Создаю…');
+    });
+  }
+  const btnSalesImport = document.getElementById('btnSalesImport');
+  if(btnSalesImport){
+    btnSalesImport.addEventListener('click', async (evt)=>{
+      const btn = evt.currentTarget;
+      await withLoading(btn, async ()=>{
+        const file = document.getElementById('salesImportFile')?.files?.[0];
+        if(!file){ toast('Выберите Excel-файл плана продаж', false); return; }
+        const sel = document.getElementById('salesVersionSel');
+        const versionId = sel && sel.value ? parseInt(sel.value,10) : null;
+        if(!Number.isFinite(versionId)){ toast('Выберите версию плана продаж для импорта', false); return; }
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch(`/sales-plans/versions/${encodeURIComponent(versionId)}/import`, {method:'POST', body: fd}).then(r=>r.json());
+        if(res && res.detail) throw new Error(res.detail.msg || 'Ошибка импорта');
+        await populateSalesPlanVersions(versionId);
+        await loadSalesMatrix();
+        const inp = document.getElementById('salesImportFile');
+        if(inp) inp.value = '';
+      }, 'Импорт…');
+    });
+  }
+  const btnSalesLoad = document.getElementById('btnSalesLoad');
+  if(btnSalesLoad) btnSalesLoad.addEventListener('click', (evt)=>loadSalesMatrix(evt.currentTarget));
+  const btnSalesSave = document.getElementById('btnSalesSave');
+  if(btnSalesSave) btnSalesSave.addEventListener('click', (evt)=>saveSalesMatrix(evt.currentTarget));
+  const btnSalesAddRows = document.getElementById('btnSalesAddRows');
+  if(btnSalesAddRows){
+    btnSalesAddRows.addEventListener('click', ()=>{
+      const st = window.salesPlanState;
+      st.rows = _salesEnsureRowsCapacity(st.rows, (st.rows?.length || 0) + SALES_ROW_CHUNK);
+      renderSalesMatrix();
+    });
+  }
+  const salesViewGranularity = document.getElementById('salesViewGranularity');
+  if(salesViewGranularity){
+    salesViewGranularity.addEventListener('change', ()=>{
+      const g = String(salesViewGranularity.value || 'day').toLowerCase();
+      window.salesPlanState.viewGranularity = ['day','week','month','year'].includes(g) ? g : 'day';
+      _salesEnsureFutureHorizon(true);
+      _salesEnsureScaffoldDates();
+      renderSalesMatrix();
+    });
+  }
+  const btnSalesApplyHorizon = document.getElementById('btnSalesApplyHorizon');
+  if(btnSalesApplyHorizon){
+    btnSalesApplyHorizon.addEventListener('click', ()=>{
+      const from = _salesNormDate(document.getElementById('salesHorizonFrom')?.value || '');
+      const to = _salesNormDate(document.getElementById('salesHorizonTo')?.value || '');
+      if(from && to && String(from) > String(to)){
+        toast('Период задан неверно: "с" больше "по"', false);
+        return;
+      }
+      window.salesPlanState.horizonFrom = from;
+      window.salesPlanState.horizonTo = to;
+      _salesEnsureScaffoldDates();
+      renderSalesMatrix();
+    });
+  }
+  const btnSalesResetHorizon = document.getElementById('btnSalesResetHorizon');
+  if(btnSalesResetHorizon){
+    btnSalesResetHorizon.addEventListener('click', ()=>{
+      _salesEnsureFutureHorizon(true);
+      _salesEnsureScaffoldDates();
+      renderSalesMatrix();
+    });
+  }
+  el('btnRunGreedyPlan').addEventListener('click', async (evt)=>{
+    const btn=evt.currentTarget;
+    await withLoading(btn, async ()=>{
+      if(!state.selectedId){ toast('Не выбран план', false); return; }
+      try{
+        const bomSel = el('planBomVersionSel');
+        const salesSel = el('planSalesVersionSel');
+        const bomVersionId = bomSel && bomSel.value ? parseInt(bomSel.value, 10) : null;
+        const salesPlanVersionId = salesSel && salesSel.value ? parseInt(salesSel.value, 10) : null;
+        const payload = {};
+        const uploadedPaths = getLastUploadedPaths();
+        if(uploadedPaths && typeof uploadedPaths === 'object'){
+          if(uploadedPaths.plan) payload.plan_path = uploadedPaths.plan;
+          if(uploadedPaths.bom) payload.bom_path = uploadedPaths.bom;
+          if(uploadedPaths.machines) payload.machines_path = uploadedPaths.machines;
+          if(uploadedPaths.stock) payload.stock_path = uploadedPaths.stock;
+          if(Object.prototype.hasOwnProperty.call(uploadedPaths, 'receipts')){
+            payload.receipts_path = uploadedPaths.receipts || '';
+          }
+        }
+        if(Number.isFinite(bomVersionId)) payload.bom_version_id = bomVersionId;
+        if(Number.isFinite(salesPlanVersionId)) payload.sales_plan_version_id = salesPlanVersionId;
+        const j = await API.runGreedy(state.selectedId, payload);
+        toast(`Greedy: ок (операций=${j.ops}, дней=${j.days})`, true);
+        if(j && j.bom_version_id && bomSel) bomSel.value = String(j.bom_version_id);
+        if(j && j.sales_plan_version_id && salesSel) salesSel.value = String(j.sales_plan_version_id);
+        await loadHeatmap();
+        if(window.refreshPlanData) await window.refreshPlanData(); else await reloadPlans();
+      }catch(e){
+        toast('Greedy: ошибка', false);
+      }
+    }, 'Запускаю…');
+  });
 
   // Reports: Gantt + export
   (()=>{
@@ -1712,7 +2320,36 @@ el('btnUpload').addEventListener('click', async (evt)=>{
     optimizeDiff: async (id, body)=> (await fetch(`/optimize/diff/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
     jobshopFrom: async (id, body)=> (await fetch(`/optimize/jobshop/from-plan/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
     jobshopDiff: async (id, body)=> (await fetch(`/optimize/jobshop/diff/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    volumeFrom: async (id, body)=> (await fetch(`/optimize/volume/from-plan/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    volumeDiff: async (id, body)=> (await fetch(`/optimize/volume/diff/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    volumeSavePreview: async (id, body)=> (await fetch(`/optimize/volume/save-preview/${id}`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})})).json(),
+    volumeResult: async (id, opts)=> {
+      const qs = new URLSearchParams();
+      const o = opts || {};
+      if(Object.prototype.hasOwnProperty.call(o, 'include_order_allocations')) qs.set('include_order_allocations', String(!!o.include_order_allocations));
+      if(Object.prototype.hasOwnProperty.call(o, 'include_machine_buckets')) qs.set('include_machine_buckets', String(!!o.include_machine_buckets));
+      if(Object.prototype.hasOwnProperty.call(o, 'changed_only')) qs.set('changed_only', String(!!o.changed_only));
+      if(o.limit != null) qs.set('limit', String(o.limit));
+      const url = `/optimize/volume/result/${id}${qs.toString() ? ('?' + qs.toString()) : ''}`;
+      const r = await fetch(url);
+      let payload = {};
+      try{ payload = await r.json(); }catch(e){ payload = {}; }
+      return { ok: r.ok, status: r.status, body: payload };
+    },
   };
+  let optPlansById = {};
+  let optPreviewState = null;
+
+  function _setSaveReportEnabled(enabled){
+    const btn = el('btnSaveOptReport');
+    if(!btn) return;
+    btn.disabled = !enabled;
+  }
+
+  function _setPreviewState(state){
+    optPreviewState = state || null;
+    _setSaveReportEnabled(!!optPreviewState);
+  }
 
   function ensureOptTab(){
     const tabs = document.querySelector('.tabs'); if(!tabs) return;
@@ -1753,6 +2390,7 @@ el('btnUpload').addEventListener('click', async (evt)=>{
                 <select id="optSolver" style="width:100%; padding:8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
                   <option value="milp" selected>MILP (перестановка по станку)</option>
                   <option value="jobshop">Job-shop (с предшествованиями)</option>
+                  <option value="volume">Volume MILP (объёмный план)</option>
                 </select>
               </div>
             </div>
@@ -1781,25 +2419,42 @@ el('btnUpload').addEventListener('click', async (evt)=>{
                 <label style="display:flex; gap:8px; align-items:center;"><input id="optJSEnforceCap" type="checkbox" checked/> Ограничивать суточную мощность</label>
                 <div style="flex:0 0 160px;"><label>Мощность, ч/день</label><input id="optJSDayHours" type="number" step="1" min="1" value="8"/></div>
               </div>
+              <div id="volumeOpts" style="display:none; gap:12px; align-items:center; flex-wrap:wrap;">
+                <div style="flex:0 0 150px;">
+                  <label>Период квоты</label>
+                  <select id="optVolBucket" style="width:100%; padding:8px; border-radius:8px; background:#0b1220; color:#e5e7eb; border:1px solid rgba(255,255,255,.15)">
+                    <option value="week" selected>Неделя</option>
+                    <option value="month">Месяц</option>
+                  </select>
+                </div>
+                <div style="flex:1 1 240px;">
+                  <label>Item IDs (через запятую)</label>
+                  <input id="optVolItems" type="text" placeholder="400000042,400000047"/>
+                </div>
+                <div style="flex:1 1 240px;">
+                  <label>Машины (через запятую)</label>
+                  <input id="optVolMachines" type="text" placeholder="50695,50210"/>
+                </div>
+                <div style="flex:0 0 180px;"><label>Вес недопоставки (шт)</label><input id="optVolWDueQty" type="number" step="1" value="1000"/></div>
+                <div style="flex:0 0 180px;"><label>Вес просрочки (дни)</label><input id="optVolWDueTime" type="number" step="0.1" value="50"/></div>
+                <div style="flex:0 0 190px;"><label>Вес дефицита компонентов</label><input id="optVolWSupply" type="number" step="0.1" value="300"/></div>
+                <div style="flex:0 0 180px;"><label>Вес перегруза мощности</label><input id="optVolWOver" type="number" step="0.1" value="20"/></div>
+                <div style="flex:0 0 210px;"><label>Вес ассортимента (переналадки)</label><input id="optVolWMix" type="number" step="0.1" value="1"/></div>
+                <div style="flex:0 0 210px;"><label>Вес стабильности плана</label><input id="optVolWStab" type="number" step="0.1" value="0.5"/></div>
+              </div>
             </div>
 
             <div class="row" style="margin-top:10px; gap:10px; align-items:center;">
 
-              <button class="btn danger" id="btnRunOpt">Запустить оптимизацию</button>
+              <button class="btn" id="btnRunOpt">Оптимизация</button>
 
               <button class="btn" id="btnPreviewDiff">Предпросмотр (diff)</button>
+
+              <button class="btn primary" id="btnSaveOptReport" disabled>Сохранить план</button>
 
               <span class="mini" id="optRuntime"></span>
 
             </div>
-
-          </div>
-
-          <div class="card">
-
-            <h3>Отчёт (было > стало)</h3>
-
-            <div id="optReport" class="kv"></div>
 
           </div>
 
@@ -1809,23 +2464,15 @@ el('btnUpload').addEventListener('click', async (evt)=>{
 
           <div class="card">
 
-            <h3>Heatmap (было / стало)</h3>
+            <h3>Отчёт оптимизации</h3>
 
-            <div class="row" style="gap:12px;">
-
-              <div class="col" style="min-width:320px;"><div class="mini">До</div><div id="hmBefore"></div></div>
-
-              <div class="col" style="min-width:320px;"><div class="mini">После</div><div id="hmAfter"></div></div>
-
-            </div>
-
-          </div>
-
-          <div class="card">
-
-            <h3>Diff операций</h3>
-
-            <div class="table-wrap"><table id="tblDiff"></table></div>
+            <div id="optSummary" class="opt-summary-chips"></div>
+            <div id="optReport" class="kv"></div>
+            <div class="opt-section-title">Что не удалось улучшить (было в целевой функции)</div>
+            <ul id="optUnchanged" class="opt-unresolved"></ul>
+            <div class="opt-section-title">Сверка исходного и итогового плана</div>
+            <div id="optReconSummary" class="kv"></div>
+            <div id="optSolverMeta" class="mini" style="margin-top:8px;"></div>
 
           </div>
 
@@ -1835,11 +2482,41 @@ el('btnUpload').addEventListener('click', async (evt)=>{
 
   }
 
-  function renderPlansTo(selId, plans){ const sel = el(selId); if(!sel) return; sel.innerHTML=''; (plans||[]).forEach(p=>{ const o=document.createElement('option'); o.value=String(p.id); o.textContent=`#${p.id}: ${p.name} (${p.origin})`; sel.appendChild(o); }); if(window.state?.selectedId) sel.value=String(window.state.selectedId); }
-  async function loadPlansForOpt(){ try{ const plans = await api.plans(); renderPlansTo('optPlanSel', plans); }catch(e){} }
+  function renderPlansTo(selId, plans){
+    const sel = el(selId); if(!sel) return;
+    sel.innerHTML='';
+    (plans||[]).forEach((p)=>{
+      const o=document.createElement('option');
+      o.value=String(p.id);
+      o.textContent=`#${p.id}: ${p.name} (${p.origin})`;
+      sel.appendChild(o);
+    });
+    if(window.state?.selectedId) sel.value=String(window.state.selectedId);
+  }
+  function getOptPlanMeta(planId){
+    const id = Number(planId||0);
+    if(!Number.isFinite(id) || id<=0) return null;
+    return optPlansById[String(id)] || null;
+  }
+  async function loadPlansForOpt(){
+    try{
+      const plans = await api.plans();
+      optPlansById = {};
+      (plans||[]).forEach((p)=>{ if(p && p.id!=null) optPlansById[String(p.id)] = p; });
+      renderPlansTo('optPlanSel', plans);
+      if(getSolver()==='volume'){
+        const pid = parseInt((el('optPlanSel')?.value)||'0',10);
+        const selectedMeta = getOptPlanMeta(pid);
+        if(selectedMeta && String(selectedMeta.origin||'').toLowerCase()==='volume_milp'){
+          await tryLoadPersistedVolumeResult(pid, true);
+        }
+      }
+    }catch(e){}
+  }
   window.loadPlansForOpt = loadPlansForOpt;
 
   function getSolver(){ const s = el('optSolver'); return s && s.value ? s.value : 'milp'; }
+  function parseCsvList(v){ return String(v||'').split(/[,\s;]+/).map(x=>x.trim()).filter(Boolean); }
   function getOpts(){
     const solver = getSolver();
     const timeLimit = parseInt(el('optTime').value||'10',10)||10;
@@ -1855,6 +2532,30 @@ el('btnUpload').addEventListener('click', async (evt)=>{
       const enforceCap = !!(el('optJSEnforceCap') && el('optJSEnforceCap').checked);
       const dayHours = parseFloat(el('optJSDayHours')?.value||'8')||8;
       return { time_limit_sec: timeLimit, horizon_start: hs||null, horizon_end: he||null, include_setup_in_duration: incSetup, makespan_weight: wMakespan, smooth_weight: wSmooth, corridor_min_util: minUtil, corridor_max_util: maxUtil, gap_penalty_per_hour: gapPerHour, enforce_daily_cap: enforceCap, daily_cap_hours: dayHours };
+    } else if(solver==='volume'){
+      const bucket = (el('optVolBucket')?.value||'week')==='month' ? 'month' : 'week';
+      const itemIds = parseCsvList(el('optVolItems')?.value||'');
+      const machineIds = parseCsvList(el('optVolMachines')?.value||'');
+      const wDueQty = parseFloat(el('optVolWDueQty')?.value||'1000');
+      const wDueTime = parseFloat(el('optVolWDueTime')?.value||'50');
+      const wSupply = parseFloat(el('optVolWSupply')?.value||'300');
+      const wOver = parseFloat(el('optVolWOver')?.value||'20');
+      const wMix = parseFloat(el('optVolWMix')?.value||'1');
+      const wStab = parseFloat(el('optVolWStab')?.value||'0.5');
+      return {
+        bucket,
+        time_limit_sec: timeLimit,
+        horizon_start: hs||null,
+        horizon_end: he||null,
+        item_ids: itemIds,
+        machine_ids: machineIds,
+        w_due_qty: Number.isFinite(wDueQty)? wDueQty : 1000,
+        w_due_time: Number.isFinite(wDueTime)? wDueTime : 50,
+        w_supply: Number.isFinite(wSupply)? wSupply : 300,
+        w_over: Number.isFinite(wOver)? wOver : 20,
+        w_mix: Number.isFinite(wMix)? wMix : 1,
+        w_stab: Number.isFinite(wStab)? wStab : 0.5,
+      };
     } else {
       const minSetup = !!(el('optMinSetup') && el('optMinSetup').checked);
       const makespan = !!(el('optMakespan') && el('optMakespan').checked);
@@ -1863,35 +2564,759 @@ el('btnUpload').addEventListener('click', async (evt)=>{
     }
   }
 
-  function renderReport(rep){ const box = el('optReport'); if(!box) return; const b=rep?.before||{}; const a=rep?.after||{}; const rows = [ ['Количество операций', b?.ops, a?.ops], ['Переналадки', b?.setups, a?.setups], ['Переналадки, сек', b?.setup_sec, a?.setup_sec], ['Makespan, сек', b?.makespan_sec, a?.makespan_sec], ['Утилизация, ср.', b?.avg_util, a?.avg_util] ]; box.innerHTML=''; rows.forEach(r=>{ const [k,x,y]=r; const kd=document.createElement('div'); kd.textContent=String(k); const vd=document.createElement('div'); vd.textContent=`${x??''} > ${y??''}`; box.appendChild(kd); box.appendChild(vd); }); }
+  function _toNum(v, fallback){
+    const n = Number(v);
+    if(Number.isFinite(n)) return n;
+    return (fallback===undefined ? 0 : fallback);
+  }
+
+  function _fmt(v, digits){
+    const d = Number.isFinite(Number(digits)) ? Math.max(0, Number(digits)) : 0;
+    const n = _toNum(v, NaN);
+    if(!Number.isFinite(n)) return '—';
+    return n.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: d });
+  }
+
+  function _fmtSigned(v, digits){
+    const n = _toNum(v, NaN);
+    if(!Number.isFinite(n)) return '—';
+    const s = _fmt(Math.abs(n), digits);
+    if(n > 0) return `+${s}`;
+    if(n < 0) return `-${s}`;
+    return s;
+  }
+
+  function _pct(before, after){
+    const b = _toNum(before, 0);
+    const a = _toNum(after, 0);
+    if(Math.abs(b) < 1e-9){
+      if(Math.abs(a) < 1e-9) return 0;
+      return null;
+    }
+    return ((a - b) / b) * 100.0;
+  }
+
+  function _isImproved(goal, before, after){
+    const b = _toNum(before, 0);
+    const a = _toNum(after, 0);
+    const eps = 1e-9;
+    if(goal === 'max'){
+      if(a > b + eps) return 'good';
+      if(a < b - eps) return 'bad';
+      return 'flat';
+    }
+    if(a < b - eps) return 'good';
+    if(a > b + eps) return 'bad';
+    return 'flat';
+  }
+
+  function _renderKv(targetId, rows){
+    const box = el(targetId);
+    if(!box) return;
+    box.innerHTML = '';
+    (rows||[]).forEach((r)=>{
+      const k = document.createElement('div');
+      const v = document.createElement('div');
+      k.textContent = String(r[0] || '');
+      v.textContent = String(r[1] || '');
+      box.appendChild(k);
+      box.appendChild(v);
+    });
+  }
+
+  function _parseDateOnlyUtc(v){
+    const s = String(v || '').trim();
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    if(!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+    return new Date(Date.UTC(y, mo - 1, d));
+  }
+
+  function _toIsoDateUtc(dt){
+    if(!(dt instanceof Date) || Number.isNaN(dt.getTime())) return '';
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dt.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function _bucketFloorDateStr(dateStr, bucket){
+    const dt = _parseDateOnlyUtc(dateStr);
+    if(!dt) return '';
+    if(String(bucket||'week').toLowerCase() === 'month'){
+      dt.setUTCDate(1);
+      return _toIsoDateUtc(dt);
+    }
+    const wd = dt.getUTCDay(); // 0=Sun
+    const diff = (wd + 6) % 7; // days from Monday
+    dt.setUTCDate(dt.getUTCDate() - diff);
+    return _toIsoDateUtc(dt);
+  }
+
+  function _nearestPeriodIndex(periods, dateStr){
+    if(!Array.isArray(periods) || !periods.length) return 0;
+    const target = _parseDateOnlyUtc(dateStr);
+    if(!target) return 0;
+    let best = 0;
+    let bestAbs = Number.POSITIVE_INFINITY;
+    periods.forEach((p, idx)=>{
+      const d = _parseDateOnlyUtc(p);
+      if(!d) return;
+      const gap = Math.abs(d.getTime() - target.getTime());
+      if(gap < bestAbs){
+        bestAbs = gap;
+        best = idx;
+      }
+    });
+    return best;
+  }
+
+  function _sumAbsDiff(before, after){
+    const n = Math.max(Array.isArray(before)? before.length : 0, Array.isArray(after)? after.length : 0);
+    let out = 0;
+    for(let i=0;i<n;i++){
+      const b = _toNum(Array.isArray(before)? before[i] : 0, 0);
+      const a = _toNum(Array.isArray(after)? after[i] : 0, 0);
+      out += Math.abs(a - b);
+    }
+    return out;
+  }
+
+  function _parseVolumeTrace(volume){
+    const out = {
+      orders_total: null,
+      orders_fixed: null,
+      movable_orders: null,
+      horizon_selected: null,
+      forbid_past: null,
+      overload_vars: null,
+      assortment_vars: null,
+      supply_shortage_vars: null,
+      supply_components: null,
+      supply_enable_model: null,
+      solve_status: null,
+    };
+    const trace = Array.isArray(volume?.trace) ? volume.trace : [];
+    trace.forEach((ln)=>{
+      const s = String(ln || '');
+      let m = s.match(/orders:\s*total=(\d+)\s+fixed=(\d+)/i);
+      if(m){
+        out.orders_total = Number(m[1]);
+        out.orders_fixed = Number(m[2]);
+      }
+      m = s.match(/scope:\s*movable_orders=(\d+)/i);
+      if(m) out.movable_orders = Number(m[1]);
+      m = s.match(/horizon_no_past:.*selected=(\d+).*forbid_past=(true|false)/i);
+      if(m){
+        out.horizon_selected = Number(m[1]);
+        out.forbid_past = String(m[2]).toLowerCase() === 'true';
+      } else {
+        m = s.match(/horizon_no_past:.*selected=(\d+)/i);
+        if(m) out.horizon_selected = Number(m[1]);
+        m = s.match(/horizon_no_past:\s*forbid_past=(true|false)/i);
+        if(m) out.forbid_past = String(m[1]).toLowerCase() === 'true';
+      }
+      m = s.match(/model:\s*overload_vars=(\d+)/i);
+      if(m) out.overload_vars = Number(m[1]);
+      m = s.match(/model:\s*assortment_vars=(\d+)/i);
+      if(m) out.assortment_vars = Number(m[1]);
+      m = s.match(/model:\s*supply_shortage_vars=(\d+)/i);
+      if(m) out.supply_shortage_vars = Number(m[1]);
+      m = s.match(/supply:\s*components=(\d+)\s+enable_model=(true|false)/i);
+      if(m){
+        out.supply_components = Number(m[1]);
+        out.supply_enable_model = String(m[2]).toLowerCase() === 'true';
+      }
+      m = s.match(/solve_done:\s*status=([A-Z_]+)/i);
+      if(m) out.solve_status = String(m[1]).toUpperCase();
+    });
+    return out;
+  }
+
+  function _parseVolumeWeights(volume, fallback){
+    const out = {
+      w_due_qty: _toNum(fallback?.w_due_qty, 0),
+      w_due_time: _toNum(fallback?.w_due_time, 0),
+      w_supply: _toNum(fallback?.w_supply, 0),
+      w_over: _toNum(fallback?.w_over, 0),
+      w_mix: _toNum(fallback?.w_mix, 0),
+      w_stab: _toNum(fallback?.w_stab, 0),
+    };
+    const trace = Array.isArray(volume?.trace) ? volume.trace : [];
+    const objectiveLine = trace.find((x)=> String(x||'').includes('objective:'));
+    if(!objectiveLine) return out;
+    ['w_due_qty','w_due_time','w_supply','w_over','w_mix','w_stab'].forEach((k)=>{
+      const re = new RegExp(`${k}=([0-9eE+.-]+)`);
+      const m = String(objectiveLine).match(re);
+      if(m){
+        const n = Number(m[1]);
+        if(Number.isFinite(n)) out[k] = n;
+      }
+    });
+    return out;
+  }
+
+  function _buildVolumeOrderReconcile(volume){
+    const periods = Array.isArray(volume?.periods) ? volume.periods : [];
+    const bucket = String(volume?.bucket || 'week').toLowerCase();
+    const changes = Array.isArray(volume?.order_changes) ? volume.order_changes : [];
+    const rows = [];
+    let movedQtyTotal = 0;
+    let changedCellsTotal = 0;
+    let stabilityAbsTotal = 0;
+    changes.forEach((r)=>{
+      const before = Array.isArray(r?.before) ? r.before : [];
+      const after = Array.isArray(r?.after) ? r.after : [];
+      const n = Math.max(before.length, after.length);
+      let changedCells = 0;
+      for(let i=0;i<n;i++){
+        const b = _toNum(before[i], 0);
+        const a = _toNum(after[i], 0);
+        if(Math.abs(a - b) > 1e-9) changedCells += 1;
+      }
+      const absDiff = _sumAbsDiff(before, after);
+      const movedQty = absDiff / 2.0;
+      const dueDate = String(r?.due_date || '');
+      const dueBucket = _bucketFloorDateStr(dueDate, bucket) || dueDate;
+      const dueIdx = _nearestPeriodIndex(periods, dueBucket);
+      let lateBefore = 0, lateAfter = 0, earlyBefore = 0, earlyAfter = 0;
+      for(let t=0;t<n;t++){
+        const b = _toNum(before[t], 0);
+        const a = _toNum(after[t], 0);
+        if(t > dueIdx){
+          lateBefore += b;
+          lateAfter += a;
+        }else if(t < dueIdx){
+          earlyBefore += b;
+          earlyAfter += a;
+        }
+      }
+      let effect = 'без изменений срока';
+      if(lateAfter < lateBefore) effect = 'меньше просрочки';
+      else if(lateAfter > lateBefore) effect = 'больше просрочки';
+      else if(earlyAfter < earlyBefore) effect = 'меньше раннего выпуска';
+      else if(earlyAfter > earlyBefore) effect = 'больше раннего выпуска';
+      rows.push({
+        order_id: String(r?.order_id || ''),
+        item_id: String(r?.item_id || ''),
+        due_date: dueDate,
+        moved_qty: movedQty,
+        changed_cells: changedCells,
+        late_before: lateBefore,
+        late_after: lateAfter,
+        early_before: earlyBefore,
+        early_after: earlyAfter,
+        effect,
+      });
+      movedQtyTotal += movedQty;
+      changedCellsTotal += changedCells;
+      stabilityAbsTotal += absDiff;
+    });
+    rows.sort((x, y)=>{
+      if(Math.abs(y.moved_qty - x.moved_qty) > 1e-9) return y.moved_qty - x.moved_qty;
+      return (y.late_before - y.late_after) - (x.late_before - x.late_after);
+    });
+    return {
+      rows,
+      moved_qty_total: movedQtyTotal,
+      changed_cells_total: changedCellsTotal,
+      stability_abs_total: stabilityAbsTotal,
+    };
+  }
+
+  function renderReport(rep, solver){
+    const box = el('optReport'); if(!box) return;
+    const b=rep?.before||{}; const a=rep?.after||{};
+    const rows = [
+      ['Количество операций', b?.ops, a?.ops, 0, 'min'],
+      ['Переналадки', b?.setups, a?.setups, 0, 'min'],
+      ['Переналадки, сек', b?.setup_sec, a?.setup_sec, 0, 'min'],
+      ['Makespan, сек', b?.makespan_sec, a?.makespan_sec, 0, 'min'],
+      ['Утилизация, ср.', b?.avg_util, a?.avg_util, 3, 'max'],
+    ];
+    const head = `
+      <table class="opt-kpi-table">
+        <thead><tr><th>Показатель</th><th>Было</th><th>Стало</th><th>Δ</th><th>Δ%</th></tr></thead>
+        <tbody>
+    `;
+    const body = rows.map((r)=>{
+      const [label, before, after, digits, goal] = r;
+      const delta = _toNum(after, 0) - _toNum(before, 0);
+      const pct = _pct(before, after);
+      const cls = _isImproved(goal, before, after);
+      const pctText = (pct===null) ? '—' : `${_fmtSigned(pct, 1)}%`;
+      return `
+        <tr>
+          <td>${label}</td>
+          <td class="num">${_fmt(before, digits)}</td>
+          <td class="num">${_fmt(after, digits)}</td>
+          <td class="num opt-delta ${cls}">${_fmtSigned(delta, digits)}</td>
+          <td class="num opt-delta ${cls}">${pctText}</td>
+        </tr>
+      `;
+    }).join('');
+    box.innerHTML = `${head}${body}</tbody></table>`;
+    _renderKv('optReconSummary', []);
+    const unresolved = el('optUnchanged');
+    if(unresolved) unresolved.innerHTML = '';
+    const summary = el('optSummary');
+    if(summary) summary.innerHTML = '';
+  }
+
+  function renderVolumeExecutiveReport(volume, solverOpts){
+    const summary = el('optSummary');
+    const report = el('optReport');
+    const unresolved = el('optUnchanged');
+    const recon = el('optReconSummary');
+    if(!summary || !report || !unresolved || !recon) return;
+
+    const before = volume?.kpi_before || {};
+    const after = volume?.kpi_after || {};
+    const traceInfo = _parseVolumeTrace(volume);
+    const weights = _parseVolumeWeights(volume, solverOpts || {});
+    const reconcile = _buildVolumeOrderReconcile(volume);
+
+    const kpiDefs = [
+      { key:'unmet_qty', label:'Недопоставка, шт', digits:0, goal:'min' },
+      { key:'late_weighted_days', label:'Просрочка, взв. дни', digits:0, goal:'min' },
+      { key:'late_qty', label:'Просрочка, шт', digits:0, goal:'min' },
+      { key:'overload_hours', label:'Перегруз мощности, ч', digits:2, goal:'min' },
+      { key:'shortage_qty', label:'Дефицит компонентов, шт', digits:2, goal:'min' },
+      { key:'mix_count', label:'Сортимент (item×машина×период)', digits:0, goal:'min' },
+      { key:'early_weighted_days', label:'Раннее выполнение, взв. дни', digits:0, goal:'min' },
+      { key:'early_qty', label:'Раннее выполнение, шт', digits:0, goal:'min' },
+      { key:'avg_util', label:'Утилизация, средняя', digits:3, goal:'max' },
+    ];
+
+    const kpiRows = kpiDefs.map((d)=>{
+      const b = _toNum(before?.[d.key], 0);
+      const a = _toNum(after?.[d.key], 0);
+      const delta = a - b;
+      const pct = _pct(b, a);
+      const cls = _isImproved(d.goal, b, a);
+      return { ...d, before:b, after:a, delta, pct, cls };
+    });
+
+    const improved = kpiRows.filter((x)=>x.cls==='good').length;
+    const worsened = kpiRows.filter((x)=>x.cls==='bad').length;
+    const changedOrders = Array.isArray(volume?.order_changes) ? volume.order_changes.length : 0;
+    const movable = _toNum(volume?.orders_movable, _toNum(traceInfo.movable_orders, 0));
+    const total = _toNum(volume?.orders_total, _toNum(traceInfo.orders_total, 0));
+    const status = String(volume?.status || traceInfo.solve_status || '').toUpperCase() || 'UNKNOWN';
+
+    summary.innerHTML = [
+      `<span class="opt-chip ${status==='OPTIMAL'?'good':(status==='FEASIBLE'?'warn':'bad')}">Статус: ${status}</span>`,
+      `<span class="opt-chip ${improved>=worsened?'good':'warn'}">Улучшено KPI: ${improved} / ${kpiRows.length}</span>`,
+      `<span class="opt-chip ${changedOrders>0?'good':'warn'}">Изменено заказов: ${changedOrders}</span>`,
+      `<span class="opt-chip">Подвижные: ${movable}${total>0?` из ${total}`:''}</span>`,
+      `<span class="opt-chip">Перенесено объёма: ${_fmt(reconcile.moved_qty_total, 0)} шт</span>`,
+    ].join('');
+
+    const tableHead = `
+      <table class="opt-kpi-table">
+        <thead><tr><th>Целевой показатель</th><th>Было</th><th>Стало</th><th>Δ</th><th>Δ%</th></tr></thead>
+        <tbody>
+    `;
+    const tableBody = kpiRows.map((r)=>{
+      const pctText = (r.pct===null) ? '—' : `${_fmtSigned(r.pct, 1)}%`;
+      return `
+        <tr>
+          <td>${r.label}</td>
+          <td class="num">${_fmt(r.before, r.digits)}</td>
+          <td class="num">${_fmt(r.after, r.digits)}</td>
+          <td class="num opt-delta ${r.cls}">${_fmtSigned(r.delta, r.digits)}</td>
+          <td class="num opt-delta ${r.cls}">${pctText}</td>
+        </tr>
+      `;
+    }).join('');
+    report.innerHTML = `${tableHead}${tableBody}</tbody></table>`;
+
+    const objectiveDefs = [
+      { key:'unmet_qty', weight:'w_due_qty', label:'Недопоставка (шт)', goal:'min' },
+      { key:'late_weighted_days', weight:'w_due_time', label:'Просрочка (взв. дни)', goal:'min' },
+      { key:'shortage_qty', weight:'w_supply', label:'Дефицит компонентов (шт)', goal:'min', traceVar:'supply_shortage_vars' },
+      { key:'overload_hours', weight:'w_over', label:'Перегруз мощности (ч)', goal:'min', traceVar:'overload_vars' },
+      { key:'mix_count', weight:'w_mix', label:'Сортимент', goal:'min', traceVar:'assortment_vars' },
+      { key:'stability_abs', weight:'w_stab', label:'Сдвиг от исходного (шт×период)', goal:'min' },
+    ];
+
+    const unresolvedRows = [];
+    objectiveDefs.forEach((d)=>{
+      const w = _toNum(weights?.[d.weight], 0);
+      if(w <= 0) return;
+      let b = _toNum(before?.[d.key], 0);
+      let a = _toNum(after?.[d.key], 0);
+      if(d.key === 'stability_abs'){
+        b = 0;
+        a = reconcile.stability_abs_total;
+      }
+      const cls = _isImproved(d.goal, b, a);
+      if(cls === 'good') return;
+      const reasons = [];
+      if(movable <= 0) reasons.push('в выбранном скоупе нет подвижных заказов');
+      if(d.traceVar && Number.isFinite(_toNum(traceInfo?.[d.traceVar], NaN)) && _toNum(traceInfo?.[d.traceVar], 0) === 0){
+        if(d.traceVar === 'supply_shortage_vars') reasons.push('в модели нет переменных дефицита (ограничение неактивно/отключено)');
+        if(d.traceVar === 'overload_vars') reasons.push('в модели нет переменных перегруза для выбранного скоупа');
+        if(d.traceVar === 'assortment_vars') reasons.push('в модели нет переменных сортимента для выбранного скоупа');
+      }
+      if(changedOrders === 0) reasons.push('план по заказам не изменился');
+      if(status === 'FEASIBLE') reasons.push('решение FEASIBLE (лимит времени), глобальный оптимум не доказан');
+      if(d.key === 'stability_abs' && changedOrders > 0) reasons.push('рост штрафа стабильности — цена улучшения сроков/нагрузки');
+      if(!reasons.length) reasons.push('критерий конкурирует с более приоритетными весами и ограничениями');
+      unresolvedRows.push({
+        label: d.label,
+        before: b,
+        after: a,
+        weight: w,
+        reason: reasons.join('; '),
+      });
+    });
+
+    if(!unresolvedRows.length){
+      unresolved.innerHTML = '<li>По всем активным критериям есть улучшение или сохранение оптимального уровня.</li>';
+    }else{
+      unresolved.innerHTML = unresolvedRows.map((r)=>(
+        `<li><strong>${r.label}</strong>: ${_fmt(r.before, 2)} → ${_fmt(r.after, 2)} (вес=${_fmt(r.weight, 2)}). ` +
+        `<span class="reason">${r.reason}</span></li>`
+      )).join('');
+    }
+
+    const lateDelta = _toNum(after?.late_qty, 0) - _toNum(before?.late_qty, 0);
+    const overDelta = _toNum(after?.overload_hours, 0) - _toNum(before?.overload_hours, 0);
+    _renderKv('optReconSummary', [
+      ['Всего заказов / подвижных', `${total} / ${movable}`],
+      ['Заказов с изменением распределения', _fmt(changedOrders, 0)],
+      ['Перенесено объёма (шт)', _fmt(reconcile.moved_qty_total, 0)],
+      ['Изменённых ячеек периодов', _fmt(reconcile.changed_cells_total, 0)],
+      ['Изменение просрочки, шт', _fmtSigned(lateDelta, 0)],
+      ['Изменение перегруза, ч', _fmtSigned(overDelta, 2)],
+    ]);
+  }
 
   function drawHeatmap(targetId, payload){ const root = el(targetId); if(!root) return; root.innerHTML=''; if(!payload||!(payload.machines||[]).length){ root.innerHTML='<div class="mini" style="padding:8px;">Нет данных</div>'; return; } const machines=payload.machines, dates=payload.dates, util=payload.util; const table=document.createElement('table'); const thead=document.createElement('thead'); const trh=document.createElement('tr'); const th0=document.createElement('th'); th0.textContent='Станок \\ Дата'; trh.appendChild(th0); dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); }); thead.appendChild(trh); table.appendChild(thead); const tbody=document.createElement('tbody'); machines.forEach(m=>{ const tr=document.createElement('tr'); const th=document.createElement('th'); th.textContent=m; tr.appendChild(th); dates.forEach(d=>{ const key=`${m}|${d}`; const u=Number(util[key]??0); const td=document.createElement('td'); td.title=`${m} · ${d} · util=${u.toFixed(2)}`; td.style.width='26px'; td.style.height='20px'; td.style.background= u<=0.8? '#16a34a' : (u<=1.0? '#f59e0b' : '#ef4444'); tr.appendChild(td); }); tbody.appendChild(tr); }); table.appendChild(tbody); root.appendChild(table); }
 
   function renderDiffTable(rows){ const tbl=el('tblDiff'); if(!tbl) return; const data = Array.isArray(rows)? rows: []; tbl.innerHTML=''; if(!data.length){ tbl.innerHTML='<thead><tr><th>Нет изменений</th></tr></thead>'; return; } const cols=['order_id','item_id','machine_id','pos_before','pos_after','start_before','start_after','end_before','end_after','delta_start_sec','delta_end_sec']; const thead=document.createElement('thead'); const trh=document.createElement('tr'); cols.forEach(c=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); }); thead.appendChild(trh); const tbody=document.createElement('tbody'); data.forEach(r=>{ const tr=document.createElement('tr'); cols.forEach(c=>{ const td=document.createElement('td'); td.textContent = r[c]===undefined? '' : String(r[c]); tr.appendChild(td); }); tbody.appendChild(tr); }); tbl.appendChild(thead); tbl.appendChild(tbody); }
 
-  async function runOptimization(){ const sel=el('optPlanSel'); if(!sel||!sel.value){ alert('Выберите исходный план'); return; } const opts = getOpts(); const solver=getSolver(); const t0=performance.now(); const j = solver==='jobshop' ? await api.jobshopFrom(parseInt(sel.value,10), opts) : await api.optimizeFrom(parseInt(sel.value,10), opts); const t = performance.now()-t0; const rt=el('optRuntime'); if(rt) rt.textContent = `Время: ${(t/1000).toFixed(2)} c`; if(j?.ok){ renderReport(j.report); if(window.toast) toast(`Оптимизация завершена > выбран план #${j.plan_id}`, true); } else { if(window.toast) toast('Ошибка оптимизации', false); } }
-  async function previewDiff(){
-    const sel=el('optPlanSel'); if(!sel||!sel.value){ alert('Выберите исходный план'); return; }
-    const opts = getOpts(); const solver=getSolver();
+  function renderVolumeOrderDiff(volume){
+    const tbl=el('tblDiff'); if(!tbl) return;
+    const rec = _buildVolumeOrderReconcile(volume);
+    const data = Array.isArray(rec.rows)? rec.rows: [];
+    tbl.innerHTML='';
+    if(!data.length){ tbl.innerHTML='<thead><tr><th>Изменений по заказам нет</th></tr></thead>'; return; }
+    const cols=['order_id','item_id','due_date','moved_qty','changed_cells','late_pair','early_pair','effect'];
+    const labels={
+      order_id:'Заказ',
+      item_id:'Item',
+      due_date:'Срок',
+      moved_qty:'Перенесено, шт',
+      changed_cells:'Изм. периодов',
+      late_pair:'Просрочка (было→стало)',
+      early_pair:'Раннее (было→стало)',
+      effect:'Комментарий',
+    };
+    const thead=document.createElement('thead');
+    const trh=document.createElement('tr');
+    cols.forEach((c)=>{ const th=document.createElement('th'); th.textContent=labels[c]||c; trh.appendChild(th); });
+    thead.appendChild(trh);
+    const tbody=document.createElement('tbody');
+    data.slice(0, 300).forEach((r)=>{
+      const row = {
+        order_id: r.order_id,
+        item_id: r.item_id,
+        due_date: r.due_date,
+        moved_qty: _fmt(r.moved_qty, 0),
+        changed_cells: _fmt(r.changed_cells, 0),
+        late_pair: `${_fmt(r.late_before, 0)} → ${_fmt(r.late_after, 0)}`,
+        early_pair: `${_fmt(r.early_before, 0)} → ${_fmt(r.early_after, 0)}`,
+        effect: r.effect,
+      };
+      const tr=document.createElement('tr');
+      cols.forEach((c)=>{
+        const td=document.createElement('td');
+        td.textContent = row[c]===undefined? '' : String(row[c]);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(thead); tbl.appendChild(tbody);
+  }
+
+  function renderVolumeLoadDiff(volume){
+    const tbl=el('tblVolLoad'); if(!tbl) return;
+    tbl.innerHTML='';
+    const before = Array.isArray(volume?.machine_buckets_before)? volume.machine_buckets_before : [];
+    const after = Array.isArray(volume?.machine_buckets)? volume.machine_buckets : [];
+    if(!after.length){
+      tbl.innerHTML='<thead><tr><th>Нет bucket-load данных</th></tr></thead>';
+      return;
+    }
+    const bMap = {};
+    before.forEach((r)=>{ bMap[`${r.machine_id}|${r.period_start}`]=r; });
+    const cols=['machine_id','period_start','load_before','cap_before','util_before','load_after','cap_after','util_after','delta_load_sec','delta_util'];
+    const thead=document.createElement('thead');
+    const trh=document.createElement('tr');
+    cols.forEach((c)=>{ const th=document.createElement('th'); th.textContent=c; trh.appendChild(th); });
+    thead.appendChild(trh);
+    const tbody=document.createElement('tbody');
+    after.forEach((r)=>{
+      const b = bMap[`${r.machine_id}|${r.period_start}`] || {};
+      const lb = Number(b.load_sec||0), cb = Number(b.cap_sec||0), ub = Number(b.util||0);
+      const la = Number(r.load_sec||0), ca = Number(r.cap_sec||0), ua = Number(r.util||0);
+      const dLoad = la - lb;
+      const dUtil = ua - ub;
+      const row = {
+        machine_id: r.machine_id,
+        period_start: r.period_start,
+        load_before: lb,
+        cap_before: cb,
+        util_before: ub.toFixed(3),
+        load_after: la,
+        cap_after: ca,
+        util_after: ua.toFixed(3),
+        delta_load_sec: dLoad,
+        delta_util: dUtil.toFixed(3),
+      };
+      const tr=document.createElement('tr');
+      cols.forEach((c)=>{ const td=document.createElement('td'); td.textContent = row[c]===undefined? '' : String(row[c]); tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(thead); tbl.appendChild(tbody);
+  }
+
+  function clearOptimizeVisuals(){
+    renderVolumeLoadDiff(null);
+    renderDiffTable([]);
+    _renderKv('optReconSummary', []);
+    const unresolved = el('optUnchanged'); if(unresolved) unresolved.innerHTML = '';
+    const summary = el('optSummary'); if(summary) summary.innerHTML = '';
+    drawHeatmap('hmBefore', null);
+    drawHeatmap('hmAfter', null);
+  }
+
+  function applyVolumeResultUI(volume, metaText){
+    const opts = getOpts();
+    renderVolumeExecutiveReport(volume, opts);
+    renderVolumeLoadDiff(volume);
+    renderVolumeOrderDiff(volume);
+    drawHeatmap('hmBefore', null);
+    drawHeatmap('hmAfter', null);
+    const meta=el('optSolverMeta');
+    if(meta) meta.textContent = metaText || `Volume status: ${volume?.status||''}; movable=${volume?.orders_movable??''}; changed=${(volume?.order_changes||[]).length}`;
+  }
+
+  async function tryLoadPersistedVolumeResult(planId, silent){
+    const pid = Number(planId||0);
+    if(!Number.isFinite(pid) || pid<=0) return false;
     try{
-      const res = solver==='jobshop' ? await api.jobshopDiff(parseInt(sel.value,10), opts) : await api.optimizeDiff(parseInt(sel.value,10), opts);
-      if(res?.ok){
-        renderReport(res.metrics);
-        drawHeatmap('hmBefore', res.heatmap?.before);
-        drawHeatmap('hmAfter', res.heatmap?.after);
-        renderDiffTable(res.ops_diff);
-      } else {
-        const msg = (res && (res.detail?.msg || res.detail)) || 'У выбранного плана нет расписания для сравнения.';
-        if(window.toast) toast('Ошибка diff: '+ msg, false);
-        else alert('Ошибка diff: '+ msg);
+      const got = await api.volumeResult(pid, {
+        include_order_allocations: false,
+        include_machine_buckets: true,
+        changed_only: false,
+      });
+      if(!got.ok){
+        if(got.status===404) return false;
+        if(!silent && window.toast) toast(`Ошибка загрузки сохранённого volume-result (#${got.status})`, false);
+        return false;
       }
-    } catch(e){ if(window.toast) toast('Ошибка diff', false); }
+      const vol = got.body?.volume || {};
+      applyVolumeResultUI(
+        vol,
+        `Volume (saved): ${vol?.status||''}; movable=${vol?.orders_movable??''}; changed=${(vol?.order_changes||[]).length}; source_plan=${vol?.source_plan_id??''}`
+      );
+      return true;
+    }catch(e){
+      if(!silent && window.toast) toast('Ошибка загрузки сохранённого volume-result', false);
+      return false;
+    }
+  }
+
+  function _cloneOpts(o){
+    try{ return JSON.parse(JSON.stringify(o||{})); }catch(_e){ return (o||{}); }
+  }
+
+  async function _runPreviewCalculation(showToastOnSuccess){
+    const sel=el('optPlanSel'); if(!sel||!sel.value){ alert('Выберите исходный план'); return {ok:false}; }
+    const opts = getOpts();
+    const solver=getSolver();
+    const meta=el('optSolverMeta');
+    const pid = parseInt(sel.value,10);
+    const t0=performance.now();
+    try{
+      if(solver==='volume'){
+        const selectedMeta = getOptPlanMeta(pid);
+        if(selectedMeta && String(selectedMeta.origin||'').toLowerCase()==='volume_milp'){
+          const loaded = await tryLoadPersistedVolumeResult(pid, true);
+          const t = performance.now()-t0;
+          const rt=el('optRuntime'); if(rt) rt.textContent = `Время: ${(t/1000).toFixed(2)} c`;
+          if(loaded){
+            _setPreviewState(null);
+            if(showToastOnSuccess && window.toast) toast(`Загружен сохранённый volume-result для плана #${pid}`, true);
+            return {ok:true, loaded_saved:true};
+          }
+        }
+      }
+
+      const res = solver==='jobshop'
+        ? await api.jobshopDiff(pid, opts)
+        : (solver==='volume'
+            ? await api.volumeDiff(pid, opts)
+            : await api.optimizeDiff(pid, opts));
+      const t = performance.now()-t0;
+      const rt=el('optRuntime'); if(rt) rt.textContent = `Время: ${(t/1000).toFixed(2)} c`;
+
+      if(res?.ok){
+        if(solver==='volume'){
+          applyVolumeResultUI(
+            res.volume,
+            `Volume preview: ${res.volume?.status||''}; movable=${res.volume?.orders_movable??''}; changed=${(res.volume?.order_changes||[]).length}; план ещё не сохранён`
+          );
+        } else {
+          renderReport(res.metrics, solver);
+          clearOptimizeVisuals();
+          if(meta) meta.textContent = 'Предпросмотр рассчитан; план ещё не сохранён в БД.';
+        }
+        _setPreviewState({
+          solver,
+          plan_id: Number(pid),
+          opts: _cloneOpts(opts),
+          volume: (solver==='volume' ? _cloneOpts(res.volume || {}) : null),
+          calculated_at: Date.now(),
+        });
+        if(showToastOnSuccess && window.toast){
+          toast('Отчёт рассчитан. Для записи плана нажмите "Сохранить план".', true);
+        }
+        return {ok:true, loaded_saved:false, solver, plan_id: pid};
+      }
+
+      _setPreviewState(null);
+      if(meta) meta.textContent = '';
+      const msg = (res && (res.detail?.msg || res.detail)) || 'У выбранного плана нет расписания для сравнения.';
+      if(window.toast) toast('Ошибка diff: '+ msg, false);
+      else alert('Ошибка diff: '+ msg);
+      return {ok:false};
+    } catch(e){
+      _setPreviewState(null);
+      if(meta) meta.textContent = '';
+      if(window.toast) toast('Ошибка diff', false);
+      return {ok:false};
+    }
+  }
+
+  async function runOptimization(){
+    await _runPreviewCalculation(true);
+  }
+
+  async function previewDiff(){
+    await _runPreviewCalculation(false);
+  }
+
+  async function saveOptimizationReport(){
+    const meta=el('optSolverMeta');
+    const sel=el('optPlanSel');
+    if(!optPreviewState){
+      if(window.toast) toast('Сначала рассчитайте отчёт', false);
+      return;
+    }
+    if(!sel || !sel.value){
+      if(window.toast) toast('Выберите исходный план', false);
+      return;
+    }
+
+    const currentSolver = getSolver();
+    const currentPlanId = parseInt(sel.value,10);
+    const currentOpts = _cloneOpts(getOpts());
+    const previewOpts = _cloneOpts(optPreviewState.opts || {});
+    if(
+      !Number.isFinite(currentPlanId) ||
+      currentPlanId !== Number(optPreviewState.plan_id) ||
+      String(currentSolver) !== String(optPreviewState.solver) ||
+      JSON.stringify(currentOpts) !== JSON.stringify(previewOpts)
+    ){
+      if(window.toast) toast('Параметры изменились. Пересчитайте отчёт перед сохранением.', false);
+      return;
+    }
+
+    const t0=performance.now();
+    try{
+      let j = null;
+      if(currentSolver === 'volume'){
+        const previewVolume = _cloneOpts(optPreviewState.volume || {});
+        if(!previewVolume || !Array.isArray(previewVolume.order_allocations)){
+          if(window.toast) toast('Нет рассчитанного preview для сохранения. Пересчитайте отчёт.', false);
+          return;
+        }
+        j = await api.volumeSavePreview(currentPlanId, { criteria: previewOpts, volume: previewVolume });
+      } else {
+        j = currentSolver==='jobshop'
+          ? await api.jobshopFrom(currentPlanId, previewOpts)
+          : await api.optimizeFrom(currentPlanId, previewOpts);
+      }
+      const t = performance.now()-t0;
+      const rt=el('optRuntime'); if(rt) rt.textContent = `Время: ${(t/1000).toFixed(2)} c`;
+
+      if(j?.ok){
+        if(currentSolver==='volume'){
+          const stored = j.volume_storage || {};
+          applyVolumeResultUI(
+            j.volume,
+            `Volume saved: ${j.volume?.status||''}; movable=${j.volume?.orders_movable??''}; changed=${(j.volume?.order_changes||[]).length}; saved_rows=${stored.order_bucket_rows??''}`
+          );
+        } else {
+          renderReport(j.report, currentSolver);
+          clearOptimizeVisuals();
+          if(meta) meta.textContent = 'План сохранён в БД.';
+        }
+        _setPreviewState(null);
+        if(window.state) window.state.selectedId = Number(j.plan_id||0) || window.state.selectedId;
+        await loadPlansForOpt();
+        const sel2 = el('optPlanSel');
+        if(sel2 && j.plan_id != null){
+          sel2.value = String(j.plan_id);
+        }
+        if(window.toast) toast(`План сохранён: #${j.plan_id}`, true);
+        return;
+      }
+
+      if(meta) meta.textContent = '';
+      if(window.toast) toast('Ошибка сохранения плана', false);
+    } catch(e){
+      if(meta) meta.textContent = '';
+      if(window.toast) toast('Ошибка сохранения плана', false);
+    }
   }
 
   document.addEventListener('DOMContentLoaded', ()=>{
     ensureOptTab(); ensureOptPage();
-    const b1 = document.getElementById('btnRunOpt'); if(b1) b1.addEventListener('click', (e)=>withLoading(e.currentTarget, runOptimization, 'Оптимизирую…'));
+    loadPlansForOpt();
+    _setPreviewState(null);
+    const b1 = document.getElementById('btnRunOpt'); if(b1) b1.addEventListener('click', (e)=>withLoading(e.currentTarget, runOptimization, 'Оптимизация…'));
     const b2 = document.getElementById('btnPreviewDiff'); if(b2) b2.addEventListener('click', previewDiff);
+    const b3 = document.getElementById('btnSaveOptReport'); if(b3) b3.addEventListener('click', (e)=>withLoading(e.currentTarget, saveOptimizationReport, 'Сохраняю…'));
+    const planSel = document.getElementById('optPlanSel');
+    if(planSel){
+      planSel.addEventListener('change', async ()=>{
+        _setPreviewState(null);
+        if(getSolver()!=='volume') return;
+        const pid = parseInt(planSel.value||'0',10);
+        const selectedMeta = getOptPlanMeta(pid);
+        if(selectedMeta && String(selectedMeta.origin||'').toLowerCase()==='volume_milp'){
+          await tryLoadPersistedVolumeResult(pid, true);
+        }
+      });
+    }
+    const solverSel = document.getElementById('optSolver');
+    if(solverSel){
+      solverSel.addEventListener('change', async ()=>{
+        _setPreviewState(null);
+        if(getSolver()!=='volume') return;
+        const pid = parseInt((el('optPlanSel')?.value)||'0',10);
+        const selectedMeta = getOptPlanMeta(pid);
+        if(selectedMeta && String(selectedMeta.origin||'').toLowerCase()==='volume_milp'){
+          await tryLoadPersistedVolumeResult(pid, true);
+        }
+      });
+    }
   });
 })();
 
@@ -1915,8 +3340,10 @@ el('btnUpload').addEventListener('click', async (evt)=>{
       const solver = (sel && sel.value) ? sel.value : 'milp';
       const milp = document.getElementById('milpOpts');
       const js = document.getElementById('jobshopOpts');
+      const vol = document.getElementById('volumeOpts');
       if(milp) milp.style.display = (solver==='milp')? 'flex' : 'none';
       if(js) js.style.display = (solver==='jobshop')? 'flex' : 'none';
+      if(vol) vol.style.display = (solver==='volume')? 'flex' : 'none';
     }
   });
   async function fill(){
@@ -1984,8 +3411,10 @@ if (!('setupGanttScrollSync' in window) || typeof window.setupGanttScrollSync !=
       var solver = (sel && sel.value) ? sel.value : 'milp';
       var milp = document.getElementById('milpOpts');
       var js = document.getElementById('jobshopOpts');
+      var vol = document.getElementById('volumeOpts');
       if(milp) milp.style.display = (solver==='milp')? 'flex' : 'none';
       if(js) js.style.display = (solver==='jobshop')? 'flex' : 'none';
+      if(vol) vol.style.display = (solver==='volume')? 'flex' : 'none';
     });
   }catch(e){}
 }
@@ -2034,13 +3463,924 @@ async function refreshPlanData(){
     if(typeof reloadPlans === 'function') await reloadPlans();
     const selectors = ['hmPlanSel','mgPlanSel','ordersPlanSel','orderPlanSel','prodPlanSel','evalPlanSel','repPlanSel','tdPlanSel'];
     for(const sid of selectors){ await populatePlans(sid); }
+    if(typeof window.populateSalesPlanVersions === 'function'){ await window.populateSalesPlanVersions(); }
     ensurePlanOptionsFromRep('orderPlanSel');
     ensurePlanOptionsFromRep('prodPlanSel');
     ensurePlanOptionsFromRep('evalPlanSel');
+    if(typeof window.populateBomVersionSelectors === 'function'){ await window.populateBomVersionSelectors(); }
     if(typeof window.loadPlansForOpt === 'function'){ await window.loadPlansForOpt(); }
   }catch(e){}
 }
 window.refreshPlanData = refreshPlanData;
+
+window.salesPlanState = window.salesPlanState || {
+  versions: [],
+  versionId: null,
+  rawDates: [],
+  rows: [],
+  columns: [],
+  viewGranularity: 'day',
+  horizonFrom: '',
+  horizonTo: '',
+  selection: null,
+  activeCell: null,
+  editCell: null,
+  dragSelecting: false,
+};
+
+const SALES_MIN_ROWS = 100;
+const SALES_ROW_CHUNK = 100;
+const SALES_AUTO_HORIZON_DAYS = 90;
+
+function _salesNormDate(value){
+  const s = String(value || '').trim();
+  if(!s) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if(Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function _salesToDate(s){
+  const n = _salesNormDate(s);
+  if(!n) return null;
+  const [y,m,d] = n.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  if(Number.isNaN(dt.getTime())) return null;
+  return dt;
+}
+
+function _salesFromDateObj(dt){
+  if(!(dt instanceof Date) || Number.isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const d = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
+
+function _salesAddDays(ds, days){
+  const dt = _salesToDate(ds);
+  if(!dt) return '';
+  dt.setDate(dt.getDate() + Number(days || 0));
+  return _salesFromDateObj(dt);
+}
+
+function _salesSortDates(dates){
+  return Array.from(new Set((dates||[]).map(_salesNormDate).filter(Boolean))).sort();
+}
+
+function _salesDateGE(a,b){ return String(a||'') >= String(b||''); }
+function _salesDateLE(a,b){ return String(a||'') <= String(b||''); }
+
+function _salesToday(){
+  return _salesFromDateObj(new Date());
+}
+
+function _salesMaxDate(dates){
+  const sorted = _salesSortDates(dates || []);
+  return sorted.length ? sorted[sorted.length - 1] : '';
+}
+
+function _salesEnsureFutureHorizon(forceReset){
+  const st = window.salesPlanState;
+  const today = _salesToday();
+  const fromRaw = _salesNormDate(st.horizonFrom || '');
+  const toRaw = _salesNormDate(st.horizonTo || '');
+  const rawMax = _salesMaxDate(st.rawDates || []);
+  const baseTo = _salesAddDays(today, SALES_AUTO_HORIZON_DAYS);
+  const minTo = (rawMax && _salesDateGE(rawMax, baseTo)) ? rawMax : baseTo;
+
+  let from = fromRaw;
+  let to = toRaw;
+
+  if(forceReset || !from || !_salesDateGE(from, today)){
+    from = today;
+  }
+  if(forceReset){
+    to = (!to || !_salesDateGE(to, minTo)) ? minTo : to;
+  } else {
+    if(!to || !_salesDateGE(to, from)) to = minTo;
+    if(!_salesDateGE(to, today)) to = minTo;
+  }
+  if(!_salesDateGE(to, from)) to = minTo;
+
+  st.horizonFrom = from;
+  st.horizonTo = to;
+}
+
+function _salesEnsureScaffoldDates(){
+  const st = window.salesPlanState;
+  const from = _salesNormDate(st.horizonFrom || '');
+  const to = _salesNormDate(st.horizonTo || '');
+  if(!from || !to || !_salesDateGE(to, from)) return;
+
+  const all = _salesSortDates(st.rawDates || []);
+  const seen = new Set(all);
+  let cur = from;
+  let guard = 0;
+  while(cur && _salesDateLE(cur, to) && guard < 5000){
+    if(!seen.has(cur)){
+      all.push(cur);
+      seen.add(cur);
+    }
+    cur = _salesAddDays(cur, 1);
+    guard += 1;
+  }
+  st.rawDates = _salesSortDates(all);
+}
+
+function _salesStartOfWeek(ds){
+  const dt = _salesToDate(ds);
+  if(!dt) return '';
+  const wd = (dt.getDay() + 6) % 7; // Monday=0
+  dt.setDate(dt.getDate() - wd);
+  return _salesFromDateObj(dt);
+}
+
+function _salesStartOfMonth(ds){
+  const dt = _salesToDate(ds);
+  if(!dt) return '';
+  dt.setDate(1);
+  return _salesFromDateObj(dt);
+}
+
+function _salesStartOfYear(ds){
+  const dt = _salesToDate(ds);
+  if(!dt) return '';
+  dt.setMonth(0,1);
+  return _salesFromDateObj(dt);
+}
+
+function _salesEndOfMonth(startDs){
+  const dt = _salesToDate(startDs);
+  if(!dt) return '';
+  dt.setMonth(dt.getMonth()+1, 0);
+  return _salesFromDateObj(dt);
+}
+
+function _salesEndOfYear(startDs){
+  const dt = _salesToDate(startDs);
+  if(!dt) return '';
+  dt.setMonth(11,31);
+  return _salesFromDateObj(dt);
+}
+
+function _salesEnsureRowsCapacity(rows, minRows){
+  const out = Array.isArray(rows) ? rows.slice() : [];
+  const need = Math.max(Number(minRows || SALES_MIN_ROWS), out.length);
+  while(out.length < need){
+    out.push({ item_id:'', article_name:'', customer:'', quantities:{} });
+  }
+  return out;
+}
+
+function _salesExpandRowsIfNeeded(lastRowIndex){
+  const st = window.salesPlanState;
+  const idx = Number(lastRowIndex || 0);
+  if(!Number.isFinite(idx) || idx < 0) return;
+  if(idx < st.rows.length) return;
+  const target = Math.ceil((idx + 1) / SALES_ROW_CHUNK) * SALES_ROW_CHUNK;
+  st.rows = _salesEnsureRowsCapacity(st.rows, target);
+}
+
+function _salesMaybeAutoExpandNearEnd(rowIdx){
+  const st = window.salesPlanState;
+  const r = Number(rowIdx || 0);
+  if(!Number.isFinite(r)) return;
+  if(r >= st.rows.length - 1){
+    st.rows = _salesEnsureRowsCapacity(st.rows, st.rows.length + SALES_ROW_CHUNK);
+  }
+}
+
+function _salesRebuildRawDates(){
+  const st = window.salesPlanState;
+  const all = [];
+  (st.rows||[]).forEach((r)=>{
+    const q = r && r.quantities ? r.quantities : {};
+    Object.keys(q).forEach((k)=>{ if((q[k]||0)>0) all.push(k); });
+  });
+  st.rawDates = _salesSortDates([...(st.rawDates || []), ...all]);
+}
+
+function _salesApplyHorizon(dates){
+  const st = window.salesPlanState;
+  const from = _salesNormDate(st.horizonFrom || '');
+  const to = _salesNormDate(st.horizonTo || '');
+  return (dates||[]).filter((d)=>{
+    if(from && !_salesDateGE(d, from)) return false;
+    if(to && !_salesDateLE(d, to)) return false;
+    return true;
+  });
+}
+
+function _salesBuildColumns(){
+  const st = window.salesPlanState;
+  const all = [];
+  (st.rows||[]).forEach((r)=>{
+    const q = r && r.quantities ? r.quantities : {};
+    Object.keys(q).forEach((k)=>{ if((q[k]||0)>0) all.push(_salesNormDate(k)); });
+  });
+  st.rawDates = _salesSortDates([...(st.rawDates || []), ...all]);
+  const dayDates = _salesApplyHorizon(st.rawDates || []);
+  const gran = st.viewGranularity || 'day';
+  const cols = [];
+  const map = new Map();
+
+  const pushCol = (key, start, end, label)=>{
+    if(!key || map.has(key)) return;
+    map.set(key, true);
+    cols.push({ key, start, end, anchor:key, label });
+  };
+
+  if(gran === 'day'){
+    dayDates.forEach((d)=> pushCol(d, d, d, d));
+  } else if(gran === 'week'){
+    dayDates.forEach((d)=>{
+      const s = _salesStartOfWeek(d);
+      const e = _salesAddDays(s, 6);
+      pushCol(s, s, e, `${s}..${e}`);
+    });
+  } else if(gran === 'month'){
+    dayDates.forEach((d)=>{
+      const s = _salesStartOfMonth(d);
+      const e = _salesEndOfMonth(s);
+      pushCol(s, s, e, `${s.slice(0,7)}`);
+    });
+  } else {
+    dayDates.forEach((d)=>{
+      const s = _salesStartOfYear(d);
+      const e = _salesEndOfYear(s);
+      pushCol(s, s, e, `${s.slice(0,4)}`);
+    });
+  }
+  return cols.sort((a,b)=> String(a.start).localeCompare(String(b.start)));
+}
+
+function _salesRowPeriodValue(row, col){
+  if(!row || !col) return 0;
+  const q = row.quantities || {};
+  let sum = 0;
+  Object.entries(q).forEach(([k,v])=>{
+    const ds = _salesNormDate(k);
+    if(!ds) return;
+    if(_salesDateGE(ds, col.start) && _salesDateLE(ds, col.end)){
+      const n = Number(v || 0);
+      if(Number.isFinite(n)) sum += n;
+    }
+  });
+  return Math.round(sum);
+}
+
+function _salesSetRowPeriodValue(row, col, value){
+  if(!row || !col) return;
+  row.quantities = row.quantities || {};
+  const q = row.quantities;
+  const n = Number(value || 0);
+  const val = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+  if((window.salesPlanState.viewGranularity || 'day') === 'day'){
+    if(val > 0) q[col.anchor] = val; else delete q[col.anchor];
+    return;
+  }
+  Object.keys(q).forEach((k)=>{
+    const ds = _salesNormDate(k);
+    if(ds && _salesDateGE(ds, col.start) && _salesDateLE(ds, col.end)) delete q[k];
+  });
+  if(val > 0) q[col.anchor] = val;
+}
+
+function _salesSelectionRect(){
+  const sel = window.salesPlanState.selection;
+  if(!sel || !sel.anchor || !sel.focus) return null;
+  const r1 = Math.min(sel.anchor.r, sel.focus.r);
+  const r2 = Math.max(sel.anchor.r, sel.focus.r);
+  const c1 = Math.min(sel.anchor.c, sel.focus.c);
+  const c2 = Math.max(sel.anchor.c, sel.focus.c);
+  return {r1,r2,c1,c2};
+}
+
+function _salesSetSelection(r,c,extend){
+  const st = window.salesPlanState;
+  if(!extend || !st.selection || !st.selection.anchor){
+    st.selection = { anchor:{r,c}, focus:{r,c} };
+  } else {
+    st.selection.focus = {r,c};
+  }
+  st.activeCell = {r,c};
+}
+
+function _salesApplySelectionClasses(tbl){
+  if(!tbl) return;
+  tbl.querySelectorAll('td.sales-cell').forEach((td)=>{
+    td.classList.remove('selected-cell');
+    td.classList.remove('anchor-cell');
+  });
+  const rect = _salesSelectionRect();
+  if(!rect) return;
+  const anchor = window.salesPlanState.selection?.anchor || null;
+  for(let r=rect.r1; r<=rect.r2; r++){
+    for(let c=rect.c1; c<=rect.c2; c++){
+      const td = tbl.querySelector(`td.sales-cell[data-r="${r}"][data-c="${c}"]`);
+      if(td) td.classList.add('selected-cell');
+    }
+  }
+  if(anchor){
+    const a = tbl.querySelector(`td.sales-cell[data-r="${anchor.r}"][data-c="${anchor.c}"]`);
+    if(a) a.classList.add('anchor-cell');
+  }
+}
+
+function _salesGetCellDisplayValue(rowIdx, colIdx){
+  const st = window.salesPlanState;
+  const row = (st.rows||[])[rowIdx] || {item_id:'', article_name:'', customer:'', quantities:{}};
+  if(colIdx === 0) return String(row.item_id || '');
+  if(colIdx === 1) return String(row.article_name || '');
+  if(colIdx === 2) return String(row.customer || '');
+  const col = (st.columns||[])[colIdx - 3];
+  if(!col) return '';
+  const v = _salesRowPeriodValue(row, col);
+  return v > 0 ? String(v) : '';
+}
+
+function _salesPasteText(tsv, startR, startC){
+  const st = window.salesPlanState;
+  const lines = String(tsv || '').replace(/\r/g, '').split('\n');
+  if(lines.length && lines[lines.length-1] === '') lines.pop();
+  if(!lines.length) return;
+  _salesExpandRowsIfNeeded(startR + lines.length - 1);
+  const end = {r:startR, c:startC};
+  const touchedItems = new Set();
+  for(let i=0; i<lines.length; i++){
+    const vals = lines[i].split('\t');
+    const r = startR + i;
+    if(r < 0 || r >= (st.rows||[]).length) continue;
+    const row = st.rows[r];
+    row.quantities = row.quantities || {};
+    for(let j=0; j<vals.length; j++){
+      const c = startC + j;
+      if(c < 0 || c >= 3 + (st.columns||[]).length) continue;
+      const raw = String(vals[j] || '').trim();
+      if(c === 0){ row.item_id = raw; touchedItems.add(raw); }
+      else if(c === 1){ row.article_name = raw; }
+      else if(c === 2){ row.customer = raw; }
+      else {
+        const col = st.columns[c-3];
+        if(!col) continue;
+        const num = raw === '' ? 0 : Number(String(raw).replace(/\s+/g,'').replace(',', '.'));
+        _salesSetRowPeriodValue(row, col, Number.isFinite(num) ? num : 0);
+      }
+      end.r = Math.max(end.r, r);
+      end.c = Math.max(end.c, c);
+    }
+  }
+  _salesRebuildRawDates();
+  _salesMaybeAutoExpandNearEnd(end.r);
+  const toResolve = Array.from(touchedItems).map((x)=>String(x||'').trim()).filter(Boolean);
+  if(toResolve.length){
+    resolveSalesArticleNames(toResolve).then((m)=>{
+      (st.rows||[]).forEach((r)=>{
+        const key = String(r.item_id || '').trim();
+        if(key && Object.prototype.hasOwnProperty.call(m, key)){
+          r.article_name = String(m[key] || '');
+        }
+      });
+      renderSalesMatrix();
+      _salesSetSelection(startR, startC, false);
+      _salesSetSelection(end.r, end.c, true);
+      _salesApplySelectionClasses(document.getElementById('salesMatrixTable'));
+    }).catch(()=>{});
+  }
+  renderSalesMatrix();
+  _salesSetSelection(startR, startC, false);
+  _salesSetSelection(end.r, end.c, true);
+  _salesApplySelectionClasses(document.getElementById('salesMatrixTable'));
+}
+
+function _salesCopySelection(){
+  const rect = _salesSelectionRect();
+  if(!rect) return;
+  const lines = [];
+  for(let r=rect.r1; r<=rect.r2; r++){
+    const vals = [];
+    for(let c=rect.c1; c<=rect.c2; c++) vals.push(_salesGetCellDisplayValue(r,c));
+    lines.push(vals.join('\t'));
+  }
+  const txt = lines.join('\n');
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).catch(()=>{});
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try{ document.execCommand('copy'); }catch(e){}
+    document.body.removeChild(ta);
+  }
+}
+
+function _salesBindClipboard(){
+  if(window.__salesClipboardBound) return;
+  window.__salesClipboardBound = true;
+  document.addEventListener('mouseup', ()=>{ window.salesPlanState.dragSelecting = false; });
+  const tbl = document.getElementById('salesMatrixTable');
+  if(!tbl) return;
+  if(!tbl.hasAttribute('tabindex')) tbl.setAttribute('tabindex', '0');
+  tbl.addEventListener('keydown', (e)=>{
+    if((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'c'){
+      _salesCopySelection();
+      e.preventDefault();
+      return;
+    }
+    if((e.key === 'Delete' || e.key === 'Backspace') && window.salesPlanState?.activeCell){
+      const cell = window.salesPlanState.activeCell;
+      if(cell.c >= 3){
+        const row = (window.salesPlanState.rows||[])[cell.r];
+        const col = (window.salesPlanState.columns||[])[cell.c - 3];
+        if(row && col){
+          _salesSetRowPeriodValue(row, col, 0);
+          _salesRebuildRawDates();
+          renderSalesMatrix();
+          e.preventDefault();
+        }
+      }
+    }
+  });
+  tbl.addEventListener('paste', (e)=>{
+    const st = window.salesPlanState;
+    const cell = st.activeCell || st.selection?.anchor || {r:0,c:0};
+    const txt = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    if(txt){
+      _salesPasteText(txt, cell.r, cell.c);
+      e.preventDefault();
+    }
+  });
+}
+
+function renderSalesMatrix(){
+  const st = window.salesPlanState;
+  const tbl = document.getElementById('salesMatrixTable');
+  if(!tbl) return;
+  st.rows = _salesEnsureRowsCapacity(st.rows, SALES_MIN_ROWS);
+  _salesEnsureFutureHorizon(false);
+  _salesEnsureScaffoldDates();
+  st.columns = _salesBuildColumns();
+
+  const granSel = document.getElementById('salesViewGranularity');
+  if(granSel && granSel.value !== String(st.viewGranularity || 'day')) granSel.value = String(st.viewGranularity || 'day');
+  const hf = document.getElementById('salesHorizonFrom');
+  const ht = document.getElementById('salesHorizonTo');
+  if(hf && hf.value !== String(st.horizonFrom || '')) hf.value = String(st.horizonFrom || '');
+  if(ht && ht.value !== String(st.horizonTo || '')) ht.value = String(st.horizonTo || '');
+
+  tbl.innerHTML = '';
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  ['Артикул','Наименование','Клиент', ...(st.columns||[]).map((c)=>c.label)].forEach((name)=>{
+    const th = document.createElement('th');
+    th.textContent = name;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  tbl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for(let r=0; r<st.rows.length; r++){
+    const row = st.rows[r] || { item_id:'', article_name:'', customer:'', quantities:{} };
+    row.quantities = row.quantities || {};
+    const tr = document.createElement('tr');
+
+    const tdItem = document.createElement('td');
+    tdItem.className = 'sales-cell fixed-col';
+    tdItem.dataset.r = String(r);
+    tdItem.dataset.c = '0';
+    const inpItem = document.createElement('input');
+    inpItem.type = 'text';
+    inpItem.value = String(row.item_id || '');
+    inpItem.addEventListener('focus', ()=>{ _salesSetSelection(r,0,false); _salesApplySelectionClasses(tbl); });
+    inpItem.addEventListener('mousedown', ()=>{ _salesSetSelection(r,0,false); _salesApplySelectionClasses(tbl); });
+    inpItem.addEventListener('change', async (e)=>{
+      row.item_id = String(e.target.value || '').trim();
+      if(!row.item_id){
+        row.article_name = '';
+        renderSalesMatrix();
+        return;
+      }
+      const m = await resolveSalesArticleNames([row.item_id]);
+      row.article_name = String(m[row.item_id] || row.article_name || '');
+      _salesMaybeAutoExpandNearEnd(r);
+      renderSalesMatrix();
+    });
+    tdItem.appendChild(inpItem);
+    tdItem.addEventListener('mousedown', ()=>{ st.dragSelecting=true; _salesSetSelection(r,0,false); _salesApplySelectionClasses(tbl); });
+    tdItem.addEventListener('mouseenter', ()=>{ if(st.dragSelecting){ _salesSetSelection(r,0,true); _salesApplySelectionClasses(tbl); } });
+    tr.appendChild(tdItem);
+
+    const tdName = document.createElement('td');
+    tdName.className = 'sales-cell fixed-col';
+    tdName.dataset.r = String(r);
+    tdName.dataset.c = '1';
+    tdName.textContent = String(row.article_name || '');
+    tdName.addEventListener('mousedown', ()=>{ st.dragSelecting=true; _salesSetSelection(r,1,false); _salesApplySelectionClasses(tbl); });
+    tdName.addEventListener('mouseenter', ()=>{ if(st.dragSelecting){ _salesSetSelection(r,1,true); _salesApplySelectionClasses(tbl); } });
+    tr.appendChild(tdName);
+
+    const tdCust = document.createElement('td');
+    tdCust.className = 'sales-cell fixed-col';
+    tdCust.dataset.r = String(r);
+    tdCust.dataset.c = '2';
+    const inpCust = document.createElement('input');
+    inpCust.type = 'text';
+    inpCust.value = String(row.customer || '');
+    inpCust.addEventListener('focus', ()=>{ _salesSetSelection(r,2,false); _salesApplySelectionClasses(tbl); });
+    inpCust.addEventListener('mousedown', ()=>{ _salesSetSelection(r,2,false); _salesApplySelectionClasses(tbl); });
+    inpCust.addEventListener('change', (e)=>{ row.customer = String(e.target.value || '').trim(); });
+    inpCust.addEventListener('change', ()=>{ _salesMaybeAutoExpandNearEnd(r); });
+    tdCust.appendChild(inpCust);
+    tdCust.addEventListener('mousedown', ()=>{ st.dragSelecting=true; _salesSetSelection(r,2,false); _salesApplySelectionClasses(tbl); });
+    tdCust.addEventListener('mouseenter', ()=>{ if(st.dragSelecting){ _salesSetSelection(r,2,true); _salesApplySelectionClasses(tbl); } });
+    tr.appendChild(tdCust);
+
+    for(let ci=0; ci<st.columns.length; ci++){
+      const col = st.columns[ci];
+      const td = document.createElement('td');
+      td.className = 'sales-cell';
+      td.dataset.r = String(r);
+      td.dataset.c = String(ci + 3);
+      const v = _salesRowPeriodValue(row, col);
+      td.textContent = v > 0 ? String(v) : '';
+      td.style.textAlign = 'right';
+      td.addEventListener('mousedown', ()=>{
+        st.dragSelecting=true;
+        _salesSetSelection(r,ci+3,false);
+        _salesApplySelectionClasses(tbl);
+        tbl.focus();
+      });
+      td.addEventListener('mouseenter', ()=>{ if(st.dragSelecting){ _salesSetSelection(r,ci+3,true); _salesApplySelectionClasses(tbl); } });
+      td.addEventListener('dblclick', ()=>{
+        _salesSetSelection(r,ci+3,false);
+        _salesApplySelectionClasses(tbl);
+        if(td.querySelector('input')) return;
+        const inEdit = document.createElement('input');
+        inEdit.type = 'number';
+        inEdit.min = '0';
+        inEdit.step = '1';
+        inEdit.value = v > 0 ? String(v) : '';
+        td.innerHTML = '';
+        td.appendChild(inEdit);
+        const commit = ()=>{
+          const n = Number(String(inEdit.value || '').replace(',', '.'));
+          _salesSetRowPeriodValue(row, col, Number.isFinite(n) ? n : 0);
+          _salesRebuildRawDates();
+          _salesMaybeAutoExpandNearEnd(r);
+          renderSalesMatrix();
+        };
+        const cancel = ()=>{ renderSalesMatrix(); };
+        inEdit.addEventListener('blur', commit);
+        inEdit.addEventListener('keydown', (e)=>{
+          if(e.key === 'Enter'){ inEdit.blur(); e.preventDefault(); }
+          else if(e.key === 'Escape'){ cancel(); e.preventDefault(); }
+        });
+        setTimeout(()=>{ inEdit.focus(); inEdit.select(); }, 0);
+      });
+      tr.appendChild(td);
+    }
+
+    tbody.appendChild(tr);
+  }
+
+  tbl.appendChild(tbody);
+  _salesApplySelectionClasses(tbl);
+  _salesBindClipboard();
+
+  const meta = document.getElementById('salesSaveMeta');
+  if(meta){
+    const nonEmpty = st.rows.filter((r)=> String(r.item_id||'').trim() || Object.keys(r.quantities||{}).length>0 || String(r.customer||'').trim()).length;
+    const labels = { day:'день', week:'неделя', month:'месяц', year:'год' };
+    meta.textContent = `Строк: ${st.rows.length} (заполнено ${nonEmpty}) | Периодов: ${st.columns.length} | Формат: ${labels[st.viewGranularity] || st.viewGranularity} | Горизонт: ${SALES_AUTO_HORIZON_DAYS}д`;
+  }
+}
+
+async function populateSalesPlanVersions(preferredVersionId){
+  try{
+    const res = await fetch('/sales-plans/versions');
+    const versions = await res.json();
+    const list = Array.isArray(versions) ? versions.slice() : [];
+    list.sort((a,b)=> Number(b.id||0) - Number(a.id||0));
+    window.salesPlanState.versions = list;
+
+    const fill = (id, placeholder)=>{
+      const sel = document.getElementById(id);
+      if(!sel) return;
+      const prev = sel.value ? String(sel.value) : '';
+      sel.innerHTML = '';
+      if(placeholder){
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '- версия не выбрана -';
+        sel.appendChild(o);
+      }
+      list.forEach((v)=>{
+        const o = document.createElement('option');
+        o.value = String(v.id);
+        o.textContent = `#${v.id} · ${v.name} · rows=${v.row_count || 0}`;
+        sel.appendChild(o);
+      });
+      const target = String(preferredVersionId || prev || (list[0] ? list[0].id : ''));
+      if(target && [...sel.options].some((o)=>o.value===target)) sel.value = target;
+    };
+
+    fill('salesVersionSel', false);
+    fill('planSalesVersionSel', true);
+    const runSel = document.getElementById('planSalesVersionSel');
+    const currentPlan = (window.state && Array.isArray(window.state.plans))
+      ? window.state.plans.find((p)=>p.id===window.state.selectedId)
+      : null;
+    if(runSel && currentPlan && currentPlan.sales_plan_version_id && [...runSel.options].some((o)=>o.value===String(currentPlan.sales_plan_version_id))){
+      runSel.value = String(currentPlan.sales_plan_version_id);
+    }
+
+    const chosen = document.getElementById('salesVersionSel')?.value || '';
+    window.salesPlanState.versionId = chosen ? parseInt(chosen, 10) : null;
+    const meta = document.getElementById('salesVersionMeta');
+    if(meta){
+      const cur = list.find((v)=>String(v.id) === String(chosen || (list[0]?.id || '')));
+      meta.textContent = cur ? `#${cur.id} · ${cur.name} · строк: ${cur.row_count || 0}` : 'Нет версии плана продаж';
+    }
+  }catch(e){
+    const meta = document.getElementById('salesVersionMeta');
+    if(meta) meta.textContent = 'Ошибка загрузки версий плана продаж';
+  }
+}
+window.populateSalesPlanVersions = populateSalesPlanVersions;
+
+async function loadSalesMatrix(btn){
+  const sel = document.getElementById('salesVersionSel');
+  const versionId = sel && sel.value ? parseInt(sel.value,10) : null;
+  if(!Number.isFinite(versionId)){
+    toast('Выберите версию плана продаж', false);
+    return;
+  }
+  const run = async ()=>{
+    const res = await fetch(`/sales-plans/versions/${encodeURIComponent(versionId)}/matrix`).then((r)=>r.json());
+    if(res && res.detail) throw new Error(res.detail.msg || 'Ошибка загрузки матрицы');
+    const st = window.salesPlanState;
+    st.versionId = versionId;
+    st.rawDates = _salesSortDates(res.dates || []);
+    st.rows = (Array.isArray(res.rows) ? res.rows.map((r)=>(
+      {
+        item_id: String(r.item_id || ''),
+        article_name: String(r.article_name || ''),
+        customer: String(r.customer || ''),
+        quantities: Object.assign({}, r.quantities || {}),
+      }
+    )) : []);
+    st.rows = _salesEnsureRowsCapacity(st.rows, SALES_MIN_ROWS);
+    st.horizonFrom = '';
+    st.horizonTo = '';
+    _salesEnsureFutureHorizon(true);
+    _salesEnsureScaffoldDates();
+    st.selection = null;
+    st.activeCell = null;
+    renderSalesMatrix();
+  };
+  if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Загрузка…'); else await run();
+}
+window.loadSalesMatrix = loadSalesMatrix;
+
+async function saveSalesMatrix(btn){
+  const st = window.salesPlanState;
+  const versionId = st.versionId;
+  if(!Number.isFinite(versionId)){
+    toast('Выберите версию плана продаж', false);
+    return;
+  }
+
+  const payloadRows = (st.rows || []).map((r)=>(
+    {
+      item_id: String(r.item_id || '').trim(),
+      customer: String(r.customer || '').trim(),
+      quantities: Object.assign({}, r.quantities || {}),
+    }
+  )).filter((r)=> r.item_id || r.customer || Object.keys(r.quantities||{}).length > 0);
+
+  const run = async ()=>{
+    const res = await fetch(`/sales-plans/versions/${encodeURIComponent(versionId)}/matrix`, {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rows: payloadRows}),
+    }).then((r)=>r.json());
+    if(res && res.detail) throw new Error(res.detail.msg || 'Ошибка сохранения');
+    toast(`Сохранено строк: ${res.saved_rows ?? 0}`, true);
+    await populateSalesPlanVersions(versionId);
+    await loadSalesMatrix();
+  };
+  try{
+    if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Сохранение…'); else await run();
+  }catch(e){
+    toast(String(e && e.message ? e.message : e), false);
+  }
+}
+window.saveSalesMatrix = saveSalesMatrix;
+
+window.bomState = window.bomState || { versions: [] };
+
+function _fmtBomVersion(v){
+  if(!v) return '';
+  const marker = v.is_active ? ' [active]' : '';
+  const ts = v.created_at ? ` · ${String(v.created_at).slice(0,19).replace('T',' ')}` : '';
+  return `#${v.id} · ${v.name || 'BOM'} · rows=${v.row_count || 0}${marker}${ts}`;
+}
+
+async function populateBomVersionSelectors(preferredVersionId){
+  try{
+    const res = await fetch('/bom/versions');
+    const versions = await res.json();
+    const list = Array.isArray(versions) ? versions.slice() : [];
+    list.sort((a,b)=> Number(b.id||0) - Number(a.id||0));
+    window.bomState.versions = list;
+    const active = list.find(v=> !!v.is_active) || list[0] || null;
+    const preferred = preferredVersionId ? String(preferredVersionId) : null;
+
+    const fill = (id, withPlaceholder, forcedTarget)=>{
+      const sel = document.getElementById(id);
+      if(!sel) return;
+      const prev = sel.value ? String(sel.value) : '';
+      sel.innerHTML = '';
+      if(withPlaceholder){
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '— выберите версию BOM —';
+        sel.appendChild(o);
+      }
+      list.forEach(v=>{
+        const o = document.createElement('option');
+        o.value = String(v.id);
+        o.textContent = _fmtBomVersion(v);
+        sel.appendChild(o);
+      });
+      const target = forcedTarget || preferred || prev || (active ? String(active.id) : '');
+      if(target && [...sel.options].some(o=>o.value===target)) sel.value = target;
+    };
+
+    fill('bomVersionSel', true);
+    fill('planBomVersionSel', false);
+    const newest = list[0] ? String(list[0].id) : '';
+    const older = list[1] ? String(list[1].id) : newest;
+    fill('bomDiffFromSel', true, older);
+    fill('bomDiffToSel', true, newest);
+
+    const meta = document.getElementById('planBomMeta');
+    if(meta){
+      meta.textContent = active
+        ? `Активная BOM версия: #${active.id} (${active.name || 'BOM'})`
+        : 'Нет BOM версий. Загрузите BOM из Excel на вкладке BOM.';
+    }
+    const bomMeta = document.getElementById('bomVersionMeta');
+    if(bomMeta){
+      bomMeta.textContent = active
+        ? `Активная: #${active.id} · ${active.name || 'BOM'}`
+        : 'Нет версий BOM';
+    }
+  }catch(e){
+    const meta = document.getElementById('planBomMeta');
+    if(meta) meta.textContent = 'Ошибка загрузки BOM версий';
+  }
+}
+window.populateBomVersionSelectors = populateBomVersionSelectors;
+
+function _selectedBomVersionId(){
+  const sel = document.getElementById('bomVersionSel');
+  if(!sel || !sel.value) return null;
+  const v = parseInt(sel.value, 10);
+  return Number.isFinite(v) ? v : null;
+}
+
+async function loadBomReport(btn){
+  const versionId = _selectedBomVersionId();
+  if(!versionId){ toast('Выберите BOM версию', false); return; }
+  const item = (document.getElementById('bomFilterItem')?.value || '').trim();
+  const component = (document.getElementById('bomFilterComponent')?.value || '').trim();
+  const machine = (document.getElementById('bomFilterMachine')?.value || '').trim();
+  const limitRaw = parseInt((document.getElementById('bomFilterLimit')?.value || '1000'), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, limitRaw)) : 1000;
+  const qs = new URLSearchParams();
+  if(item) qs.set('item_id', item);
+  if(component) qs.set('component_id', component);
+  if(machine) qs.set('machine_family', machine);
+  qs.set('limit', String(limit));
+  qs.set('offset', '0');
+  const run = async ()=>{
+    const res = await fetch(`/bom/versions/${encodeURIComponent(versionId)}/rows?${qs.toString()}`).then(r=>r.json());
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    toTable(document.getElementById('bomReportTable'), rows);
+    const ver = res.version || {};
+    const meta = document.getElementById('bomVersionMeta');
+    if(meta){
+      meta.textContent = `Версия #${ver.id || versionId} · ${ver.name || ''} · строк: ${res.total ?? rows.length}`;
+    }
+  };
+  if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Загружаю…'); else await run();
+}
+
+async function importBomVersion(btn){
+  const file = document.getElementById('bomImportFile')?.files?.[0];
+  if(!file){ toast('Выберите файл BOM', false); return; }
+  const name = (document.getElementById('bomImportName')?.value || '').trim();
+  const activate = !!document.getElementById('bomImportActivate')?.checked;
+  const fd = new FormData();
+  fd.append('file', file);
+  if(name) fd.append('name', name);
+  fd.append('activate', activate ? 'true' : 'false');
+  const run = async ()=>{
+    const res = await fetch('/bom/versions/import', { method:'POST', body: fd }).then(r=>r.json());
+    if(res?.detail){
+      throw new Error(res.detail.msg || 'Ошибка импорта BOM');
+    }
+    const ver = res?.version || {};
+    toast(`BOM загружен: версия #${ver.id}`, true);
+    await populateBomVersionSelectors(ver.id);
+  };
+  if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Загружаю…'); else await run();
+}
+
+async function activateBomVersion(btn){
+  const versionId = _selectedBomVersionId();
+  if(!versionId){ toast('Выберите BOM версию', false); return; }
+  const run = async ()=>{
+    const res = await fetch(`/bom/versions/${encodeURIComponent(versionId)}/activate`, { method:'POST' }).then(r=>r.json());
+    if(res?.detail){
+      throw new Error(res.detail.msg || 'Ошибка активации BOM');
+    }
+    toast(`Активирована BOM версия #${versionId}`, true);
+    await populateBomVersionSelectors(versionId);
+  };
+  if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Активирую…'); else await run();
+}
+
+async function loadBomDiff(btn){
+  const fromSel = document.getElementById('bomDiffFromSel');
+  const toSel = document.getElementById('bomDiffToSel');
+  const fromVersionId = fromSel && fromSel.value ? parseInt(fromSel.value, 10) : null;
+  const toVersionId = toSel && toSel.value ? parseInt(toSel.value, 10) : null;
+  if(!Number.isFinite(fromVersionId) || !Number.isFinite(toVersionId)){
+    toast('Выберите обе версии BOM для сравнения', false);
+    return;
+  }
+  const limRaw = parseInt((document.getElementById('bomDiffLimit')?.value || '2000'), 10);
+  const limit = Number.isFinite(limRaw) ? Math.max(1, Math.min(10000, limRaw)) : 2000;
+  const criteria = _bomDiffSelectedCriteria();
+  if(!criteria.length){
+    toast('Выберите хотя бы один критерий сравнения', false);
+    return;
+  }
+  const qtyThr = _bomDiffNumericInput('bomThrQty', 0);
+  const procThr = _bomDiffNumericInput('bomThrProc', 0);
+  const normThr = _bomDiffNumericInput('bomThrNorm', 0);
+  const multThr = _bomDiffNumericInput('bomThrMult', 1);
+  const qs = new URLSearchParams();
+  qs.set('from_version_id', String(fromVersionId));
+  qs.set('to_version_id', String(toVersionId));
+  qs.set('limit', String(limit));
+  qs.set('criteria', criteria.join(','));
+  qs.set('qty_pct_threshold', String(qtyThr));
+  qs.set('proc_pct_threshold', String(procThr));
+  qs.set('norm_pct_threshold', String(normThr));
+  qs.set('multiplicity_dev_pct_threshold', String(multThr));
+  const run = async ()=>{
+    const res = await fetch(`/bom/diff?${qs.toString()}`).then(r=>r.json());
+    if(res?.detail){
+      throw new Error(res.detail.msg || 'Ошибка сравнения BOM');
+    }
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    renderBomDiffTable(document.getElementById('bomDiffTable'), rows);
+    const s = res.summary || {};
+    const activeCriteria = Array.isArray(s.active_criteria) ? s.active_criteria.join(', ') : '';
+    const hits = s && typeof s.criteria_hits === 'object' && s.criteria_hits
+      ? Object.entries(s.criteria_hits)
+          .sort((a,b)=> Number(b[1]||0) - Number(a[1]||0))
+          .slice(0, 6)
+          .map(([k,v])=>`${k}:${v}`)
+          .join(', ')
+      : '';
+    const thr = s.thresholds || {};
+    const meta = document.getElementById('bomDiffMeta');
+    if(meta){
+      meta.textContent =
+        `FROM #${res?.from_version?.id || fromVersionId} -> TO #${res?.to_version?.id || toVersionId} · ` +
+        `added: ${s.added ?? 0}, removed: ${s.removed ?? 0}, changed: ${s.changed ?? 0}, structure: ${s.changed_structure ?? 0} · ` +
+        `total: ${s.total ?? rows.length}, shown: ${s.returned ?? rows.length} · ` +
+        `criteria: ${activeCriteria || 'n/a'} · ` +
+        `thr: qty>${thr.qty_pct_threshold ?? qtyThr}%, proc>${thr.proc_pct_threshold ?? procThr}%, norm>${thr.norm_pct_threshold ?? normThr}%, mult_dev>${thr.multiplicity_dev_pct_threshold ?? multThr}%` +
+        (hits ? ` · hits: ${hits}` : '');
+    }
+  };
+  if(typeof withLoading === 'function') await withLoading(btn || null, run, 'Сравниваю…'); else await run();
+}
 
 async function populateMachinesFromPlan(planSelId, machinesSelId){ const ps=document.getElementById(planSelId); const ms=document.getElementById(machinesSelId); if(!ps||!ms||!ps.value) return; try{ const j=await fetch(`/plans/${ps.value}/heatmap`).then(r=>r.json()); ms.innerHTML=''; (j.machines||[]).forEach(m=>{ const o=document.createElement('option'); o.value=String(m.id); o.textContent=machineLabel(m); ms.appendChild(o); }); }catch(e){} }
 
@@ -2083,70 +4423,323 @@ async function pasteMachinesToSelect(selectId){
   }catch(e){ console.warn('Clipboard read failed', e); }
 }
 function clearMachinesSelect(selectId){ const s=document.getElementById(selectId); if(s) s.innerHTML=''; }
-async function loadHeatmapReport(){
-      const planSel=document.getElementById('hmPlanSel');
-      const machinesSel=document.getElementById('hmMachinesSel');
-      const box=document.getElementById('heatmapReport');
-      if(!planSel||!machinesSel||!box){ return; }
-      if(!planSel.value){ box.innerHTML='<div class="mini" style="padding:8px;">Выберите план</div>'; return; }
-      box.innerHTML='';
-      try{
-        const periodSel = document.getElementById('hmPeriodSel');
-        const period = periodSel ? periodSel.value : 'day';
-        const df = (document.getElementById('hmDf')?.value||'');
-        const dt = (document.getElementById('hmDt')?.value||'');
-        const wkRaw=(document.getElementById('hmWk')?.value||'');
-        const wkList=parseList(wkRaw);
-        const wkSet=normalizeWorkshopTokens(wkRaw);
-        const qs = new URLSearchParams({ period });
-        if(wkList.length){ qs.set('workshop', wkList.join(',')); }
-        const data = await fetch(`/plans/${planSel.value}/heatmap?${qs.toString()}`).then(r=>r.json());
-        let dates=data?.dates||[];
-        if(df||dt){ dates = dates.filter(d=> (!df || d>=df) && (!dt || d<=dt)); }
+class HeatmapReportController {
+  constructor(){
+    this.activeCell = null;
+    this.detailsCache = new Map();
+    this.initialized = false;
+  }
 
-        const allMachines=data?.machines||[];
-        let machines = allMachines.slice();
-        if(wkSet.size){
-          const byWk = machines.filter(m=> wkSet.has(String(m.workshop||'').toLowerCase()));
-          if(byWk.length) machines = byWk;
-        }
-        const selected=new Set([...(machinesSel.selectedOptions||[])].map(o=>o.value));
-        if(selected.size){
-          const bySel = machines.filter(m=> selected.has(String(m.id)));
-          machines = bySel.length ? bySel : machines.filter(m=> selected.has(String(m.id)));
-        }
+  refs(){
+    return {
+      planSel: document.getElementById('hmPlanSel'),
+      periodSel: document.getElementById('hmPeriodSel'),
+      machinesSel: document.getElementById('hmMachinesSel'),
+      wkInput: document.getElementById('hmWk'),
+      dfInput: document.getElementById('hmDf'),
+      dtInput: document.getElementById('hmDt'),
+      box: document.getElementById('heatmapReport'),
+      modal: document.getElementById('hmCellModal'),
+      modalTitle: document.getElementById('hmCellTitle'),
+      modalMeta: document.getElementById('hmCellMeta'),
+      modalOps: document.getElementById('hmCellOpsTable'),
+      modalNote: document.getElementById('hmCellNote'),
+      modalClose: document.getElementById('btnHMCellClose'),
+    };
+  }
 
-        if(!machines.length){ box.innerHTML='<div class="mini" style="padding:8px;">Не выбраны станки</div>'; return; }
-        if(!dates.length){ box.innerHTML='<div class="mini" style="padding:8px;">Нет данных</div>'; return; }
-        const tbl=document.createElement('table'); tbl.className='heatmap-table';
-        const thead=document.createElement('thead'); const trh=document.createElement('tr');
-        const thMachine=document.createElement('th'); thMachine.textContent='Станок'; trh.appendChild(thMachine);
-        const thShop=document.createElement('th'); thShop.textContent='Цех'; trh.appendChild(thShop);
-        dates.forEach(d=>{ const th=document.createElement('th'); th.textContent=d; trh.appendChild(th); });
-        thead.appendChild(trh); tbl.appendChild(thead);
-        const tbody=document.createElement('tbody'); const util=data?.util||{};
-        machines.forEach(m=>{
-          const tr=document.createElement('tr');
-          const nameCell=document.createElement('td'); nameCell.className='name-cell'; nameCell.textContent=m.name||m.id; nameCell.title=machineLabel(m); tr.appendChild(nameCell);
-          const shopCell=document.createElement('td'); shopCell.className='shop-cell'; shopCell.textContent=m.workshop||'-'; shopCell.title=m.workshop||'-'; tr.appendChild(shopCell);
-          dates.forEach(d=>{
-            const key=`${m.id}|${d}`;
-            const u=Number(util[key]??0);
-            const td=document.createElement('td');
-            const span=document.createElement('span'); span.className='hm-val'; span.textContent=`${(u*100).toFixed(0)}%`; td.appendChild(span);
-            let color='#000000';
-            if(u>0 && u<1) color = mixColor('#000000','#16a34a', Math.min(1, Math.max(0,u)));
-            if(u>=1 && u<2) color = mixColor('#16a34a','#ef4444', Math.min(1,u-1));
-            if(u>=2) color='#ef4444';
-            td.style.background=color;
-            tr.appendChild(td);
-          });
-          tbody.appendChild(tr);
-        });
-        tbl.appendChild(tbody);
-        box.appendChild(tbl);
-      }catch(e){ box.innerHTML='<div class="mini" style="padding:8px;">Не удалось загрузить тепловую карту</div>'; console.error(e); }
+  init(){
+    if(this.initialized) return;
+    this.initialized = true;
+    const r = this.refs();
+    if(r.modalClose){
+      r.modalClose.addEventListener('click', ()=> this.setModalOpen(false));
     }
+    if(r.modal){
+      r.modal.addEventListener('click', (e)=>{ if(e.target === r.modal) this.setModalOpen(false); });
+    }
+    document.addEventListener('keydown', (e)=>{
+      const m = this.refs().modal;
+      if(e.key === 'Escape' && m && m.style.display === 'flex'){
+        this.setModalOpen(false);
+      }
+    });
+  }
+
+  setModalOpen(open){
+    const r = this.refs();
+    if(!r.modal) return;
+    r.modal.style.display = open ? 'flex' : 'none';
+    r.modal.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if(!open) this.setActiveCell(null);
+  }
+
+  setActiveCell(td){
+    if(this.activeCell) this.activeCell.classList.remove('selected');
+    this.activeCell = td || null;
+    if(this.activeCell) this.activeCell.classList.add('selected');
+  }
+
+  renderSimpleTable(tableEl, columns, rows, emptyText){
+    if(!tableEl) return;
+    tableEl.innerHTML = '';
+    const data = Array.isArray(rows) ? rows : [];
+    if(!data.length){
+      tableEl.innerHTML = `<thead><tr><th>${emptyText || 'Нет данных'}</th></tr></thead>`;
+      return;
+    }
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    columns.forEach(c=>{
+      const th = document.createElement('th');
+      th.textContent = c.label;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    const tbody = document.createElement('tbody');
+    data.forEach(row=>{
+      const tr = document.createElement('tr');
+      columns.forEach(c=>{
+        const td = document.createElement('td');
+        const val = row[c.key];
+        td.textContent = val == null ? '' : String(val);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    tableEl.appendChild(thead);
+    tableEl.appendChild(tbody);
+  }
+
+  getHeatmapPalette(){
+    const theme = String(document.documentElement?.dataset?.theme || '').toLowerCase();
+    if(theme === 'light'){
+      return {
+        zero: '#e2e8f0',
+        lowFrom: '#dcfce7',
+        lowTo: '#22c55e',
+        high: '#ef4444',
+        text: '#0f172a',
+        textHot: '#ffffff',
+      };
+    }
+    return {
+      zero: '#0b1220',
+      lowFrom: '#0b1220',
+      lowTo: '#16a34a',
+      high: '#ef4444',
+      text: '#e5e7eb',
+      textHot: '#fee2e2',
+    };
+  }
+
+  colorForUtil(util, palette){
+    const u = Number(util || 0);
+    const p = palette || this.getHeatmapPalette();
+    if(u >= 2) return p.high;
+    if(u >= 1) return mixColor(p.lowTo, p.high, Math.min(1, u - 1));
+    if(u > 0) return mixColor(p.lowFrom, p.lowTo, Math.min(1, Math.max(0, u)));
+    return p.zero;
+  }
+
+  async fetchCellDetails(planId, machineId, date, period){
+    const cacheKey = `${planId}|${machineId}|${date}|${period}`;
+    if(this.detailsCache.has(cacheKey)) return this.detailsCache.get(cacheKey);
+    const qs = new URLSearchParams({
+      machine_id: String(machineId || ''),
+      date: String(date || ''),
+      period: String(period || 'day'),
+    });
+    const res = await fetch(`/plans/${planId}/heatmap/cell?${qs.toString()}`).then(r=>r.json());
+    if(res?.detail){
+      const msg = typeof res.detail === 'string' ? res.detail : (res.detail.msg || 'Ошибка загрузки деталей');
+      throw new Error(msg);
+    }
+    this.detailsCache.set(cacheKey, res);
+    return res;
+  }
+
+  async showCellDetails(planId, machine, date, period, td){
+    const r = this.refs();
+    this.setActiveCell(td || null);
+    if(r.modalTitle) r.modalTitle.textContent = `Детали: ${machineLabel(machine)} · ${date}`;
+    if(r.modalMeta) r.modalMeta.textContent = 'Загрузка...';
+    if(r.modalNote) r.modalNote.textContent = '';
+    this.renderSimpleTable(r.modalOps, [{key:'_', label:'Загрузка...'}], [], 'Загрузка...');
+    this.setModalOpen(true);
+    try{
+      const details = await this.fetchCellDetails(planId, machine.id, date, period);
+      const summary = details?.summary || {};
+      if(r.modalMeta){
+        r.modalMeta.textContent =
+          `${machineLabel(machine)} · util ${(Number(summary.util || 0) * 100).toFixed(1)}% · ` +
+          `load ${summary.load_sec ?? 0} / cap ${summary.cap_sec ?? 0} сек · ` +
+          `операций ${summary.operations ?? 0}`;
+      }
+      if(r.modalNote){
+        r.modalNote.textContent = summary.truncated
+          ? `Показаны не все операции: ${summary.returned_operations || 0} из ${summary.operations || 0}`
+          : '';
+      }
+      const opsRows = (details?.operations || []).map(o=>({
+        order_id: o.order_id || '',
+        item_id: o.item_id || '',
+        op_index: o.op_index ?? '',
+        start_ts: o.start_ts ? new Date(o.start_ts).toLocaleString() : '',
+        end_ts: o.end_ts ? new Date(o.end_ts).toLocaleString() : '',
+        duration_sec: o.duration_sec || 0,
+        setup_sec: o.setup_sec || 0,
+      }));
+      this.renderSimpleTable(
+        r.modalOps,
+        [
+          {key:'order_id', label:'Заказ'},
+          {key:'item_id', label:'Артикул'},
+          {key:'op_index', label:'Шаг'},
+          {key:'start_ts', label:'Старт'},
+          {key:'end_ts', label:'Финиш'},
+          {key:'duration_sec', label:'Опер., сек'},
+          {key:'setup_sec', label:'Перенал., сек'},
+        ],
+        opsRows,
+        'Нет операций'
+      );
+    }catch(e){
+      if(r.modalMeta) r.modalMeta.textContent = 'Не удалось загрузить детали ячейки';
+      if(r.modalNote) r.modalNote.textContent = e?.message || '';
+      this.renderSimpleTable(r.modalOps, [{key:'_', label:'Ошибка'}], [], 'Ошибка');
+      console.error(e);
+    }
+  }
+
+  async load(){
+    this.init();
+    const r = this.refs();
+    const planSel = r.planSel;
+    const machinesSel = r.machinesSel;
+    const box = r.box;
+    if(!planSel || !machinesSel || !box) return;
+    if(!planSel.value){
+      box.innerHTML = '<div class="mini" style="padding:8px;">Выберите план</div>';
+      return;
+    }
+    box.innerHTML = '';
+    try{
+      const period = r.periodSel ? r.periodSel.value : 'day';
+      const df = (r.dfInput?.value || '');
+      const dt = (r.dtInput?.value || '');
+      const wkRaw = (r.wkInput?.value || '');
+      const wkList = parseList(wkRaw);
+      const wkSet = normalizeWorkshopTokens(wkRaw);
+      const qs = new URLSearchParams({ period });
+      if(wkList.length) qs.set('workshop', wkList.join(','));
+      const data = await fetch(`/plans/${planSel.value}/heatmap?${qs.toString()}`).then(resp=>resp.json());
+      if(data?.detail){
+        const msg = typeof data.detail === 'string' ? data.detail : (data.detail.msg || 'Ошибка загрузки тепловой карты');
+        throw new Error(msg);
+      }
+      let dates = data?.dates || [];
+      if(df || dt){
+        dates = dates.filter(d => (!df || d >= df) && (!dt || d <= dt));
+      }
+
+      const allMachines = data?.machines || [];
+      let machines = allMachines.slice();
+      if(wkSet.size){
+        const byWk = machines.filter(m=>wkSet.has(String(m.workshop || '').toLowerCase()));
+        if(byWk.length) machines = byWk;
+      }
+      const selected = new Set([...(machinesSel.selectedOptions || [])].map(o=>o.value));
+      if(selected.size){
+        const bySel = machines.filter(m=>selected.has(String(m.id)));
+        machines = bySel.length ? bySel : machines.filter(m=>selected.has(String(m.id)));
+      }
+
+      if(!machines.length){
+        box.innerHTML = '<div class="mini" style="padding:8px;">Не выбраны станки</div>';
+        return;
+      }
+      if(!dates.length){
+        box.innerHTML = '<div class="mini" style="padding:8px;">Нет данных</div>';
+        return;
+      }
+      const util = data?.util || {};
+      const palette = this.getHeatmapPalette();
+      const machineMap = new Map(machines.map(m=>[String(m.id), m]));
+      const tbl = document.createElement('table');
+      tbl.className = 'heatmap-table hm-main-table';
+      const thead = document.createElement('thead');
+      const trh = document.createElement('tr');
+      const thMachine = document.createElement('th');
+      thMachine.textContent = 'Станок';
+      trh.appendChild(thMachine);
+      const thShop = document.createElement('th');
+      thShop.textContent = 'Цех';
+      trh.appendChild(thShop);
+      dates.forEach(d=>{
+        const th = document.createElement('th');
+        th.textContent = d;
+        trh.appendChild(th);
+      });
+      thead.appendChild(trh);
+      tbl.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      const frag = document.createDocumentFragment();
+      machines.forEach(m=>{
+        const tr = document.createElement('tr');
+        const nameCell = document.createElement('td');
+        nameCell.className = 'name-cell';
+        nameCell.textContent = m.name || m.id;
+        nameCell.title = machineLabel(m);
+        tr.appendChild(nameCell);
+        const shopCell = document.createElement('td');
+        shopCell.className = 'shop-cell';
+        shopCell.textContent = m.workshop || '-';
+        shopCell.title = m.workshop || '-';
+        tr.appendChild(shopCell);
+        dates.forEach(d=>{
+          const key = `${m.id}|${d}`;
+          const u = Number(util[key] ?? 0);
+          const td = document.createElement('td');
+          td.className = 'hm-cell';
+          td.dataset.machineId = String(m.id);
+          td.dataset.date = String(d);
+          td.dataset.period = String(period);
+          td.title = `${machineLabel(m)} · ${d} · util=${u.toFixed(2)}`;
+          const span = document.createElement('span');
+          span.className = 'hm-val';
+          span.textContent = `${(u * 100).toFixed(0)}%`;
+          span.style.color = u >= 1.2 ? palette.textHot : palette.text;
+          td.appendChild(span);
+          td.style.background = this.colorForUtil(u, palette);
+          tr.appendChild(td);
+        });
+        frag.appendChild(tr);
+      });
+      tbody.appendChild(frag);
+      tbl.appendChild(tbody);
+      tbl.addEventListener('click', (evt)=>{
+        const td = evt.target.closest('td.hm-cell');
+        if(!td) return;
+        const machineId = String(td.dataset.machineId || '');
+        const date = String(td.dataset.date || '');
+        const period = String(td.dataset.period || 'day');
+        const machine = machineMap.get(machineId) || {id: machineId, name: machineId, workshop: ''};
+        this.showCellDetails(planSel.value, machine, date, period, td);
+      });
+      box.appendChild(tbl);
+    }catch(e){
+      box.innerHTML = '<div class="mini" style="padding:8px;">Не удалось загрузить тепловую карту</div>';
+      console.error(e);
+    }
+  }
+}
+
+window.heatmapReportController = window.heatmapReportController || new HeatmapReportController();
+
+async function loadHeatmapReport(){
+  return window.heatmapReportController.load();
+}
 
 async function loadMachineGantt(){
       const planSel = document.getElementById('mgPlanSel');
@@ -2707,6 +5300,28 @@ async function loadMachineGantt(){
         }catch(e){}
       });
     }
+    const btnBomRefresh = document.getElementById('btnBomRefresh');
+    if(btnBomRefresh){
+      btnBomRefresh.addEventListener('click', (e)=>withLoading(e.currentTarget, async ()=>{
+        await populateBomVersionSelectors();
+      }, 'Обновляю…'));
+    }
+    const btnBomActivate = document.getElementById('btnBomActivate');
+    if(btnBomActivate){
+      btnBomActivate.addEventListener('click', (e)=>activateBomVersion(e.currentTarget));
+    }
+    const btnBomImport = document.getElementById('btnBomImport');
+    if(btnBomImport){
+      btnBomImport.addEventListener('click', (e)=>importBomVersion(e.currentTarget));
+    }
+    const btnBomLoad = document.getElementById('btnBomLoad');
+    if(btnBomLoad){
+      btnBomLoad.addEventListener('click', (e)=>loadBomReport(e.currentTarget));
+    }
+    const btnBomDiff = document.getElementById('btnBomDiff');
+    if(btnBomDiff){
+      btnBomDiff.addEventListener('click', (e)=>loadBomDiff(e.currentTarget));
+    }
     const btnOL=document.getElementById('btnOrdersLoad'); if(btnOL) btnOL.addEventListener('click', (e)=>loadOrdersTable(e.currentTarget));
     const btnOS=document.getElementById('btnOrdersSave'); if(btnOS) btnOS.addEventListener('click', (e)=>saveOrdersChanges(e.currentTarget));
     const btnOPrev=document.getElementById('btnOrdersPrev'); if(btnOPrev) btnOPrev.addEventListener('click', ()=>{ const limit=readOrdersLimit(); const nextOffset=Math.max(0, (ordersState.page.offset||0)-limit); loadOrdersTable(null, {offset:nextOffset, keepOffset:true}); });
@@ -2714,9 +5329,10 @@ async function loadMachineGantt(){
     const limitSel=document.getElementById('ordersLimit'); if(limitSel) limitSel.addEventListener('change', ()=>{ ordersState.page.offset = 0; ordersState.page.limit = readOrdersLimit(); loadOrdersTable(); });
     // Ensure machine lists are populated based on selected plan
     const HPS=document.getElementById('hmPlanSel');
-    if(HPS){ HPS.addEventListener('change', ()=>{ populateMachinesFromPlan('hmPlanSel','hmMachinesSel'); populateWorkshopsFromPlan('hmPlanSel','hmWkList'); }); }
+    if(HPS){ HPS.addEventListener('change', ()=>{ populateMachinesFromPlan('hmPlanSel','hmMachinesSel'); populateWorkshopsFromPlan('hmPlanSel','hmWkList'); if(window.heatmapReportController){ window.heatmapReportController.detailsCache.clear(); window.heatmapReportController.setModalOpen(false); } }); }
     const MPS=document.getElementById('mgPlanSel');
     if(MPS){ MPS.addEventListener('change', ()=>{ populateMachinesFromPlan('mgPlanSel','mgMachinesSel'); populateWorkshopsFromPlan('mgPlanSel','mgWkList'); }); }
+    if(window.heatmapReportController){ window.heatmapReportController.init(); }
     const L=document.getElementById('btnLoadHeatmapReport'); if(L) L.addEventListener('click', (e)=> withLoading(e.currentTarget, loadHeatmapReport, 'Построение…'));
     const P=document.getElementById('hmPeriodSel'); if(P) P.addEventListener('change', loadHeatmapReport);
     const HP=document.getElementById('btnHMPaste'); if(HP) HP.addEventListener('click', ()=>pasteMachinesToSelect('hmMachinesSel'));
@@ -2736,6 +5352,12 @@ async function loadMachineGantt(){
     const TDPasteWk=document.getElementById('btnTDWkPaste'); if(TDPasteWk) TDPasteWk.addEventListener('click', ()=>pasteToField('tdWorkshops'));
     const evalBtn=document.getElementById('btnEvalRun'); if(evalBtn) evalBtn.addEventListener('click', (e)=>loadPlanEvaluation(e.currentTarget));
     const prodBtn=document.getElementById('btnProdLoad'); if(prodBtn) prodBtn.addEventListener('click', (e)=>loadProductSummary(e.currentTarget));
+    if(window.populateBomVersionSelectors){
+      await window.populateBomVersionSelectors();
+    }
+    if(window.populateSalesPlanVersions){
+      await window.populateSalesPlanVersions();
+    }
     setupGanttScrollSync('gantt');
     setupGanttScrollSync('mgGantt');
     updateOrdersPagerUI();
@@ -2760,11 +5382,15 @@ async function loadMachineGantt(){
           try{
             const payload = {};
             try{
-              if(window.lastUploadedPaths){
-                payload.plan_path = window.lastUploadedPaths.plan || null;
-                payload.bom_path = window.lastUploadedPaths.bom || null;
-                payload.machines_path = window.lastUploadedPaths.machines || null;
-                payload.stock_path = window.lastUploadedPaths.stock || null;
+              const uploadedPaths = getLastUploadedPaths();
+              if(uploadedPaths && typeof uploadedPaths === 'object'){
+                if(uploadedPaths.plan) payload.plan_path = uploadedPaths.plan;
+                if(uploadedPaths.bom) payload.bom_path = uploadedPaths.bom;
+                if(uploadedPaths.machines) payload.machines_path = uploadedPaths.machines;
+                if(uploadedPaths.stock) payload.stock_path = uploadedPaths.stock;
+                if(Object.prototype.hasOwnProperty.call(uploadedPaths, 'receipts')){
+                  payload.receipts_path = uploadedPaths.receipts || '';
+                }
               }
             }catch(e){}
             const res = await fetch(`/plans/${created.id}/run-greedy`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).then(r=>r.json());
@@ -2782,3 +5408,4 @@ async function loadMachineGantt(){
     }
   })();
 </script>
+

@@ -25,6 +25,7 @@ from .greedy.loaders import (
     load_bom_article_name_map as _L_load_bom_article_name_map,
     load_machines as _L_load_machines,
     load_stock_any as _L_load_stock_any,
+    load_receipts_any as _L_load_receipts_any,
 )
 
 # Override monolith implementations with modular versions
@@ -32,6 +33,7 @@ load_plan_of_sales = _L_load_plan_of_sales
 load_bom = _L_load_bom
 load_machines = _L_load_machines
 load_stock_any = _L_load_stock_any
+load_receipts_any = _L_load_receipts_any
 
 
 # =========================
@@ -102,6 +104,10 @@ def _rebalance_unfixed_by_item_schedule(
             mult = float(getattr(r, "qty_per_parent", 1.0) or 1.0)
             if mult <= 0:
                 mult = 1.0
+            loss = float(getattr(r, "loss", 1.0) or 1.0)
+            if loss <= 0:
+                loss = 1.0
+            mult *= loss
             key = (parent, child)
             prev = pair_map.get(key)
             if prev is None or mult > prev:
@@ -828,7 +834,13 @@ def expand_demand_with_hierarchy(
         c = r.item_id
         parents[c] = p
         if p and p != c:
-            children_map.setdefault(p, {})[c] = float(getattr(r, "qty_per_parent", 1.0)) or 1.0
+            mult = float(getattr(r, "qty_per_parent", 1.0) or 1.0)
+            if mult <= 0:
+                mult = 1.0
+            loss = float(getattr(r, "loss", 1.0) or 1.0)
+            if loss <= 0:
+                loss = 1.0
+            children_map.setdefault(p, {})[c] = mult * loss
 
     # Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ РѕР±С…РѕРґС‹
     def ancestors(x: str) -> list[str]:
@@ -885,10 +897,11 @@ def expand_demand_with_hierarchy(
             ))
         # РїРѕС‚РѕРјРєРё (РјР°СЃС€С‚Р°Р±РёСЂСѓРµРј РІРЅРёР·)
         for d, fmul, parent in descendants_with_factor(it):
+            child_qty = int(np.ceil((qty * float(fmul)) - 1e-9))
             rows.append(dict(
                 base_order_id=base_oid,
                 order_id=(f"{base_oid}:{d}" if split_child_orders else base_oid),
-                item_id=d, due_date=due, qty=int(round(qty * float(fmul))), priority=pr, role="CHILD",
+                item_id=d, due_date=due, qty=max(0, child_qty), priority=pr, role="CHILD",
                 parent_item_id=str(parent)
             ))
 
@@ -1954,12 +1967,98 @@ def main():
 if __name__ == "__main__":
     main()
 
+def _append_receipts_demand(
+    demand: pd.DataFrame,
+    receipts_df: pd.DataFrame,
+    *,
+    split_child_orders: bool,
+    reserved_order_ids: Iterable[str] | None,
+    fixed_order_qty: dict[str, float] | None,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Append receipts as separate base orders and mark them as fixed roots."""
+    out = demand.copy()
+    fixed = {}
+    for k, v in (fixed_order_qty or {}).items():
+        try:
+            qty = float(v)
+        except Exception:
+            continue
+        if not np.isfinite(qty) or qty <= 0:
+            continue
+        fixed[str(k)] = qty
+
+    if receipts_df is None or receipts_df.empty:
+        return out, fixed
+
+    reserved = {str(x) for x in (reserved_order_ids or []) if str(x)}
+    used = set(out["order_id"].astype(str).tolist()) if "order_id" in out.columns else set()
+    rows: list[dict[str, object]] = []
+
+    def _unique_base(seed: str) -> str:
+        if seed not in used and seed not in reserved:
+            used.add(seed)
+            return seed
+        i = 1
+        while True:
+            cand = f"{seed}~{i}"
+            if cand not in used and cand not in reserved:
+                used.add(cand)
+                return cand
+            i += 1
+
+    for idx, r in enumerate(receipts_df.itertuples(index=False), start=1):
+        item = str(getattr(r, "item_id", "") or "").strip()
+        if not item:
+            continue
+        try:
+            due = pd.to_datetime(getattr(r, "due_date", None)).date()
+        except Exception:
+            continue
+        try:
+            qty = float(getattr(r, "qty", 0) or 0.0)
+        except Exception:
+            qty = 0.0
+        if not np.isfinite(qty) or qty <= 0:
+            continue
+
+        base_seed = f"{item}-{pd.to_datetime(due).strftime('%Y%m%d')}-RCPT-{idx:04d}"
+        base_oid = _unique_base(base_seed)
+        rows.append(
+            {
+                "order_id": base_oid,
+                "item_id": item,
+                "due_date": due,
+                "qty": qty,
+                "priority": pd.to_datetime(due),
+            }
+        )
+        root_oid = f"{base_oid}:{item}" if split_child_orders else base_oid
+        fixed[root_oid] = qty
+
+    if not rows:
+        return out, fixed
+
+    rec = pd.DataFrame(rows)
+    if "customer" in out.columns and "customer" not in rec.columns:
+        rec["customer"] = None
+    for c in out.columns:
+        if c not in rec.columns:
+            rec[c] = None
+    rec = rec[[c for c in out.columns if c in rec.columns]]
+    out = pd.concat([out, rec], ignore_index=True, sort=False)
+    sort_cols = [c for c in ("priority", "due_date", "item_id", "order_id") if c in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols, kind="stable").reset_index(drop=True)
+    return out, fixed
+
+
 def run_pipeline(
     plan_path: str | None = None,
     bom_path: str | None = None,
     machines_path: str | None = None,
     out_xlsx: str | None = None,
     stock_path: str | None = None,
+    receipts_path: str | None = None,
     start_date: str | None = None,
     overload_pct: float = 0.0,
     split_child_orders: bool = True,
@@ -1967,6 +2066,8 @@ def run_pipeline(
     reserved_order_ids: Iterable[str] | None = None,
     fixed_order_qty: dict[str, float] | None = None,
     mode: str = "",
+    bom_df: pd.DataFrame | None = None,
+    plan_df: pd.DataFrame | None = None,
     **kwargs,
 ):
     """
@@ -1985,12 +2086,37 @@ def run_pipeline(
             return None
 
     # --- Standard pipeline ---
-    if not plan_path:
-        raise ValueError("plan_path is required for standard pipeline")
-    plan_df = load_plan_of_sales(Path(plan_path))
+    if plan_df is None:
+        if not plan_path:
+            raise ValueError("plan_path is required when plan_df is not provided")
+        plan_df = load_plan_of_sales(Path(plan_path))
+    else:
+        plan_df = plan_df.copy()
 
     demand = build_demand(plan_df, reserved_order_ids=reserved_order_ids)
-    bom = load_bom(Path(bom_path))
+    fixed_order_qty_eff = dict(fixed_order_qty or {})
+    if receipts_path:
+        try:
+            rp = Path(receipts_path)
+            if rp.exists():
+                receipts_df = load_receipts_any(rp)
+                demand, fixed_order_qty_eff = _append_receipts_demand(
+                    demand,
+                    receipts_df,
+                    split_child_orders=split_child_orders,
+                    reserved_order_ids=reserved_order_ids,
+                    fixed_order_qty=fixed_order_qty_eff,
+                )
+            else:
+                print(f"[GREEDY WARN] receipts path not found: {receipts_path}")
+        except Exception as e:
+            print("[GREEDY WARN] receipts load failed:", e)
+    if bom_df is not None:
+        bom = bom_df.copy()
+    else:
+        if not bom_path:
+            raise ValueError("bom_path is required when bom_df is not provided")
+        bom = load_bom(Path(bom_path))
     machines = load_machines(Path(machines_path))
 
     stock_map = None
@@ -2024,7 +2150,7 @@ def run_pipeline(
         align_roots_to_due=align_roots_to_due,
         stock_map=stock_map,
         reserved_order_ids=reserved_order_ids,
-        fixed_order_qty=fixed_order_qty,
+        fixed_order_qty=fixed_order_qty_eff,
         include_parents=(mode == "standard_up"),
     )
 
@@ -2032,7 +2158,7 @@ def run_pipeline(
         sched,
         bom,
         stock_map,
-        fixed_order_qty,
+        fixed_order_qty_eff,
     )
     if sched_reb is None or sched_reb.empty:
         logging.getLogger("so_planner.rebalance").warning(
@@ -2077,16 +2203,20 @@ def run_greedy(*args, **kwargs):
     out_xlsx           = kwargs.get("out_xlsx")           or "schedule_out.xlsx"
     start_date         = kwargs.get("start_date")         or None
     stock_path         = kwargs.get("stock_path")         or "stock_path.xlsx"
+    receipts_path      = kwargs.get("receipts_path")      or None
     overload_pct       = float(kwargs.get("overload_pct") or 0.0)
     split_child_orders = bool(kwargs.get("split_child_orders") or False)
     align_roots_to_due = bool(kwargs.get("align_roots_to_due") or False)
     mode               = (kwargs.get("mode") or "").lower().strip()
     reserved_order_ids = kwargs.get("reserved_order_ids") or None
     fixed_order_qty    = kwargs.get("fixed_order_qty")    or None
+    bom_df             = kwargs.get("bom_df")
+    plan_df            = kwargs.get("plan_df")
 
     out_file, sched = run_pipeline(
         plan_path, bom_path, machines_path, out_xlsx,
         stock_path=stock_path,
+        receipts_path=receipts_path,
         start_date=start_date,
         overload_pct=overload_pct,
         split_child_orders=split_child_orders,
@@ -2094,6 +2224,8 @@ def run_greedy(*args, **kwargs):
         reserved_order_ids=reserved_order_ids,
         fixed_order_qty=fixed_order_qty,
         mode=mode,
+        bom_df=bom_df,
+        plan_df=plan_df,
     )
 
     # Optional DB save path omitted here to keep merged file simple; can be re-added if needed.
@@ -2104,6 +2236,7 @@ load_plan_of_sales = _L_load_plan_of_sales
 load_bom = _L_load_bom
 load_machines = _L_load_machines
 load_stock_any = _L_load_stock_any
+load_receipts_any = _L_load_receipts_any
 
 # Drop dead/legacy loader symbols from namespace to avoid accidental use
 try:
@@ -2123,6 +2256,10 @@ try:
 except Exception:
     pass
 try:
+    del _dead_load_receipts_any
+except Exception:
+    pass
+try:
     del _legacy_load_machines
 except Exception:
     pass
@@ -2134,8 +2271,12 @@ def build_demand(plan_df: pd.DataFrame, *, reserved_order_ids: Iterable[str] | N
     If a 'customer' column exists in plan_df, group by it and keep it in the
     output; order_id will use customer as prefix when present, otherwise item_id.
     """
-    group_keys = ["item_id", "due_date"] + (["customer"] if "customer" in plan_df.columns else [])
-    g = plan_df.groupby(group_keys, as_index=False).agg(qty=("qty", "sum"))
+    src = plan_df.copy()
+    if "customer" in src.columns:
+        src["customer"] = src["customer"].fillna("").astype(str).str.strip()
+        src.loc[src["customer"].str.lower().isin({"nan", "none", "null"}), "customer"] = ""
+    group_keys = ["item_id", "due_date"] + (["customer"] if "customer" in src.columns else [])
+    g = src.groupby(group_keys, as_index=False, dropna=False).agg(qty=("qty", "sum"))
     sort_keys = ["due_date"] + (["customer"] if "customer" in g.columns else []) + ["item_id"]
     g = g.sort_values(sort_keys, kind="stable").reset_index(drop=True)
 
@@ -2145,7 +2286,11 @@ def build_demand(plan_df: pd.DataFrame, *, reserved_order_ids: Iterable[str] | N
     used: set[str] = set()
     order_ids: list[str] = []
     for _, r in g.iterrows():
-        base = str(r.get("customer", "") or r["item_id"])
+        customer_val = r.get("customer", "")
+        customer_txt = str(customer_val).strip() if customer_val is not None else ""
+        if customer_txt.lower() in {"nan", "none", "null"}:
+            customer_txt = ""
+        base = customer_txt or str(r["item_id"])
         key = (base, r["due_date"])  # sequence per (customer|item, date)
         while True:
             seq[key] = seq.get(key, 0) + 1
@@ -2182,7 +2327,13 @@ def expand_demand_with_hierarchy(
         c = r.item_id
         parents[str(c)] = str(p)
         if p and p != c:
-            children_map.setdefault(str(p), {})[str(c)] = float(getattr(r, "qty_per_parent", 1.0)) or 1.0
+            mult = float(getattr(r, "qty_per_parent", 1.0) or 1.0)
+            if mult <= 0:
+                mult = 1.0
+            loss = float(getattr(r, "loss", 1.0) or 1.0)
+            if loss <= 0:
+                loss = 1.0
+            children_map.setdefault(str(p), {})[str(c)] = mult * loss
 
     lag_map_by_edge: dict[tuple[str, str], int] = {}
     if "lag_days" in bom.columns:
@@ -2376,7 +2527,7 @@ def expand_demand_with_hierarchy(
             if ch in path:
                 continue
             mult_val = mult if np.isfinite(mult) and mult > 0 else 1.0
-            child_req = production * float(mult_val)
+            child_req = float(np.ceil((production * float(mult_val)) - 1e-9))
             child_due = _shift_due(due, ch, parent_item_id=item)
             _plan_item(
                 base_oid,

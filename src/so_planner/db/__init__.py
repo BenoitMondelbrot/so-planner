@@ -172,7 +172,25 @@ def _ensure_sqlite_columns() -> None:
             pass
 
     _ensure_column("bom", "article_name", "TEXT")
+    _ensure_column("bom", "loss", "REAL")
+    _ensure_column("bom", "workshop", "TEXT")
+    _ensure_column("bom", "time_per_unit", "REAL")
+    _ensure_column("bom", "machine_time", "REAL")
+    _ensure_column("bom", "setting_time", "REAL")
+    _ensure_column("bom", "source_step", "TEXT")
+    _ensure_column("bom", "setup_minutes", "REAL")
+    _ensure_column("bom", "lag_time", "REAL")
+    _ensure_column("bom_lines", "workshop", "TEXT")
+    _ensure_column("bom_lines", "loss", "REAL")
+    _ensure_column("bom_lines", "time_per_unit", "REAL")
+    _ensure_column("bom_lines", "machine_time", "REAL")
+    _ensure_column("bom_lines", "setting_time", "REAL")
+    _ensure_column("bom_lines", "source_step", "TEXT")
+    _ensure_column("bom_lines", "setup_minutes", "REAL")
+    _ensure_column("bom_lines", "lag_time", "REAL")
     _ensure_column("schedule_ops", "article_name", "TEXT")
+    _ensure_column("plan_versions", "bom_version_id", "INTEGER")
+    _ensure_column("plan_versions", "sales_plan_version_id", "INTEGER")
 
 @contextmanager
 def session_scope() -> Iterable[Session]:

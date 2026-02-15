@@ -10,7 +10,7 @@ import pandas as pd
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from ..models import DimMachine, BOM, Demand
+from ..models import DimMachine, BOM, Demand, BOMVersion, BOMLine
 
 # ===================== Синонимы заголовков (lowercase) =====================
 
@@ -33,7 +33,19 @@ BOM_SYNONYMS: Dict[str, Set[str]] = {
         "component_id", "component", "компонент", "сырьё", "сырье",
         "root article", "root_article", "parent", "parent item"
     },
-    "qty_per": {"qty_per", "норма", "норматив", "кол-во на ед", "количество на единицу", "qty per"},
+    "qty_per": {
+        "qty_per",
+        "qty_per_parent",
+        "qty per",
+        "qty per parent",
+        "норма",
+        "норматив",
+        "кол-во на ед",
+        "количество на единицу",
+        "кол-во на родителя",
+        "количество на родителя",
+    },
+    "loss": {"loss", "loss coeff", "loss_coefficient", "scrap", "yield_loss"},
     "routing_step": {"routing_step", "этап", "операция", "шаг", "стадия", "operations", "operation"},
     "machine_family": {
         "machine_family", "семейство", "семейство машин", "группа",
@@ -41,6 +53,13 @@ BOM_SYNONYMS: Dict[str, Set[str]] = {
     },
     "proc_time_std": {"proc_time_std", "время_операции", "такт", "нормочасы", "мин/ед"},
     "article_name": {"article name", "article_name", "item name", "item_name"},
+    "workshop": {"workshop", "shop", "С†РµС…"},
+    "time_per_unit": {"time_per_unit", "time per unit", "time/unit"},
+    "machine_time": {"machine time", "machine_time"},
+    "setting_time": {"setting time", "setting_time"},
+    "source_step": {"step", "route step", "routing step"},
+    "setup_minutes": {"setup_minutes", "setup minutes", "setup_min", "setup min"},
+    "lag_time": {"lag time", "lag_time"},
 }
 
 # Временные колонки — если нет proc_time_std, суммируем их (мин/ед)
@@ -75,6 +94,12 @@ def _rename_by_synonyms(df: pd.DataFrame, synonyms: dict[str, Set[str]]) -> pd.D
                 rename[lower_map[s]] = canon
                 break
     return df.rename(columns=rename)
+
+def _clean_text(v: Any) -> str:
+    s = str(v).strip()
+    if not s or s.lower() in {"nan", "none", "null"}:
+        return ""
+    return s
 
 # --------------------- Machines ---------------------
 
@@ -140,6 +165,17 @@ def _canonicalize_bom(df: pd.DataFrame) -> pd.DataFrame:
         if "qty_per" not in df.columns:
             df["qty_per"] = 1
 
+    # qty_per
+    if "qty_per" in df.columns:
+        df["qty_per"] = pd.to_numeric(df["qty_per"], errors="coerce").fillna(1.0)
+    else:
+        df["qty_per"] = 1.0
+    if "loss" in df.columns:
+        df["loss"] = pd.to_numeric(df["loss"], errors="coerce").fillna(1.0)
+        df.loc[df["loss"] <= 0, "loss"] = 1.0
+    else:
+        df["loss"] = 1.0
+
     # routing_step
     if "routing_step" in df.columns:
         df["routing_step"] = pd.to_numeric(df["routing_step"], errors="coerce").fillna(1).astype(int)
@@ -153,6 +189,21 @@ def _canonicalize_bom(df: pd.DataFrame) -> pd.DataFrame:
     if "article_name" in df.columns:
         df["article_name"] = df["article_name"].astype(str).str.strip()
 
+    if "workshop" in df.columns:
+        df["workshop"] = df["workshop"].astype(str).str.strip()
+    if "time_per_unit" in df.columns:
+        df["time_per_unit"] = pd.to_numeric(df["time_per_unit"], errors="coerce")
+    if "machine_time" in df.columns:
+        df["machine_time"] = pd.to_numeric(df["machine_time"], errors="coerce")
+    if "setting_time" in df.columns:
+        df["setting_time"] = pd.to_numeric(df["setting_time"], errors="coerce")
+    if "source_step" in df.columns:
+        df["source_step"] = df["source_step"].astype(str).str.strip()
+    if "setup_minutes" in df.columns:
+        df["setup_minutes"] = pd.to_numeric(df["setup_minutes"], errors="coerce")
+    if "lag_time" in df.columns:
+        df["lag_time"] = pd.to_numeric(df["lag_time"], errors="coerce")
+
     # proc_time_std: если нет — суммируем известные time-колонки
     if "proc_time_std" not in df.columns:
         lower_cols = {str(c).strip().lower(): c for c in df.columns}
@@ -161,7 +212,23 @@ def _canonicalize_bom(df: pd.DataFrame) -> pd.DataFrame:
             tmp = df[time_src_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
             df["proc_time_std"] = tmp.sum(axis=1)
 
-    keep_cols = [c for c in ["item_id", "component_id", "qty_per", "routing_step", "machine_family", "proc_time_std", "article_name"]
+    keep_cols = [c for c in [
+        "item_id",
+        "component_id",
+        "qty_per",
+        "loss",
+        "routing_step",
+        "machine_family",
+        "proc_time_std",
+        "article_name",
+        "workshop",
+        "time_per_unit",
+        "machine_time",
+        "setting_time",
+        "source_step",
+        "setup_minutes",
+        "lag_time",
+    ]
                  if c in df.columns]
     required_min = {"item_id", "component_id", "qty_per"}
     missing = sorted([c for c in required_min if c not in keep_cols])
@@ -393,7 +460,14 @@ def validate_files(machines_xlsx: str, bom_xlsx: str, plan_xlsx: str) -> Dict[st
         report["status"] = "error"
     return report
 
-def load_excels(session: Session, machines_xlsx: str, bom_xlsx: str, plan_xlsx: str, dry_run: bool = False) -> Tuple[int, int, int]:
+def load_excels(
+    session: Session,
+    machines_xlsx: str,
+    bom_xlsx: str,
+    plan_xlsx: str,
+    dry_run: bool = False,
+    create_bom_version: bool = True,
+) -> Tuple[int, int, int]:
     """Импорт в БД (или dry_run=True для подсчётов)."""
     mdf = _canonicalize_machines(_read_xlsx(machines_xlsx))
     bdf = _canonicalize_bom(_read_xlsx(bom_xlsx))
@@ -413,7 +487,23 @@ def load_excels(session: Session, machines_xlsx: str, bom_xlsx: str, plan_xlsx: 
     )
     session.bulk_insert_mappings(
         BOM,
-        bdf[[c for c in ["item_id", "component_id", "qty_per", "routing_step", "machine_family", "proc_time_std", "article_name"]
+        bdf[[c for c in [
+            "item_id",
+            "component_id",
+            "qty_per",
+            "loss",
+            "routing_step",
+            "machine_family",
+            "proc_time_std",
+            "article_name",
+            "workshop",
+            "time_per_unit",
+            "machine_time",
+            "setting_time",
+            "source_step",
+            "setup_minutes",
+            "lag_time",
+        ]
              if c in bdf.columns]].to_dict(orient="records"),
     )
     session.bulk_insert_mappings(
@@ -421,5 +511,53 @@ def load_excels(session: Session, machines_xlsx: str, bom_xlsx: str, plan_xlsx: 
         ddf[[c for c in ["order_id", "item_id", "due_date", "qty", "priority", "customer"] if c in ddf.columns]]
         .to_dict(orient="records"),
     )
+    if create_bom_version and len(bdf) > 0:
+        ver = BOMVersion(
+            name=f"Ingest {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            source_file=str(bom_xlsx),
+            is_active=False,
+            row_count=int(len(bdf)),
+            notes="Auto-created during ingest",
+        )
+        session.add(ver)
+        session.flush()
+        session.bulk_insert_mappings(
+            BOMLine,
+            [
+                {
+                    "version_id": int(ver.id),
+                    "item_id": str(r.item_id),
+                    "component_id": str(r.component_id),
+                    "qty_per": float(r.qty_per),
+                    "loss": float(getattr(r, "loss", 1.0) or 1.0),
+                    "routing_step": int(getattr(r, "routing_step", 1) or 1),
+                    "machine_family": (_clean_text(getattr(r, "machine_family", "")) or None),
+                    "proc_time_std": (
+                        float(getattr(r, "proc_time_std")) if pd.notna(getattr(r, "proc_time_std", np.nan)) else None
+                    ),
+                    "article_name": (_clean_text(getattr(r, "article_name", "")) or None),
+                    "workshop": (_clean_text(getattr(r, "workshop", "")) or None),
+                    "time_per_unit": (
+                        float(getattr(r, "time_per_unit")) if pd.notna(getattr(r, "time_per_unit", np.nan)) else None
+                    ),
+                    "machine_time": (
+                        float(getattr(r, "machine_time")) if pd.notna(getattr(r, "machine_time", np.nan)) else None
+                    ),
+                    "setting_time": (
+                        float(getattr(r, "setting_time")) if pd.notna(getattr(r, "setting_time", np.nan)) else None
+                    ),
+                    "source_step": (_clean_text(getattr(r, "source_step", "")) or None),
+                    "setup_minutes": (
+                        float(getattr(r, "setup_minutes")) if pd.notna(getattr(r, "setup_minutes", np.nan)) else None
+                    ),
+                    "lag_time": (
+                        float(getattr(r, "lag_time")) if pd.notna(getattr(r, "lag_time", np.nan)) else None
+                    ),
+                }
+                for r in bdf.itertuples(index=False)
+            ],
+        )
+        session.query(BOMVersion).filter(BOMVersion.id != int(ver.id)).update({"is_active": False})
+        ver.is_active = True
     session.commit()
     return len(mdf), len(bdf), len(ddf)

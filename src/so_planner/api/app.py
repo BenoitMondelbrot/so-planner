@@ -24,10 +24,11 @@ from ..db import SessionLocal, init_db
 from pathlib import Path
 
 from ..ingest.loader import load_excels, validate_files
+from ..bom_versioning import bom_df_to_scheduler_df, get_resolved_bom_version, get_version_rows_df
 from ..scheduling.greedy_scheduler import run_greedy, compute_orders_timeline, load_stock_any
 from ..export.report import export_excel
 from ..analysis.bottlenecks import scan_bottlenecks
-from .routers import plans, optimize
+from .routers import plans, optimize, bom, sales_plans
 
 # ================== App ==================
 app = FastAPI(title="S&O Planner API")
@@ -38,6 +39,8 @@ if os.path.isdir(STATIC_DIR):  # монтируем только если кат
 
 app.include_router(plans.router)
 app.include_router(optimize.router)
+app.include_router(bom.router)
+app.include_router(sales_plans.router)
 
 
 
@@ -63,6 +66,7 @@ LAST_PATHS = {
     "bom": "BOM.xlsx",
     "plan": "plan of sales.xlsx",
     "stock": "stock.xlsx",  # optional: stock Excel used by greedy-by-files
+    "receipts": "receipts.xlsx",  # optional: outgoing receipts used as fixed orders
     "out": "schedule_out.xlsx",
 }
 
@@ -167,6 +171,76 @@ def _parse_token_list(values: Optional[List[str]]) -> list[str]:
     return out
 
 
+def _clean_item_id(value) -> str:
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none", "null"}:
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def _resolve_plan_bom_version_id(s: Session, plan_id: int) -> int | None:
+    plan_bom_version_id = None
+    try:
+        plan_bom_version_id = s.execute(
+            text("SELECT bom_version_id FROM plan_versions WHERE id=:pid"),
+            {"pid": plan_id},
+        ).scalar_one_or_none()
+    except Exception:
+        plan_bom_version_id = None
+    try:
+        resolved = get_resolved_bom_version(s, int(plan_bom_version_id) if plan_bom_version_id is not None else None)
+        return int(resolved.id)
+    except Exception:
+        return None
+
+
+def _load_plan_bom_df(s: Session, plan_id: int) -> tuple[pd.DataFrame, int | None]:
+    cols = ["item_id", "component_id", "qty_per", "loss", "workshop"]
+    bom_version_id = _resolve_plan_bom_version_id(s, plan_id)
+    if bom_version_id is not None:
+        try:
+            df = get_version_rows_df(s, int(bom_version_id))
+            if df is None:
+                return pd.DataFrame(columns=cols), int(bom_version_id)
+            out = df.copy()
+            for col in cols:
+                if col not in out.columns:
+                    out[col] = 1.0 if col == "loss" else None
+            return out[cols], int(bom_version_id)
+        except Exception:
+            pass
+    try:
+        legacy = s.execute(
+            text(
+                "SELECT item_id, component_id, qty_per, COALESCE(loss, 1.0) AS loss, COALESCE(workshop, '') AS workshop FROM bom"
+            )
+        ).mappings().all()
+    except Exception:
+        try:
+            legacy = s.execute(
+                text("SELECT item_id, component_id, qty_per, 1.0 AS loss, '' AS workshop FROM bom")
+            ).mappings().all()
+        except Exception:
+            legacy = []
+    if not legacy:
+        return pd.DataFrame(columns=cols), bom_version_id
+    return pd.DataFrame(
+        [
+            {
+                "item_id": str(r.get("item_id") or ""),
+                "component_id": str(r.get("component_id") or ""),
+                "qty_per": float(r.get("qty_per") or 0.0),
+                "loss": float(r.get("loss") or 1.0),
+                "workshop": str(r.get("workshop") or ""),
+            }
+            for r in legacy
+        ],
+        columns=cols,
+    ), bom_version_id
+
+
 def _transfer_cache_get(key: tuple) -> Optional[dict]:
     now = time.time()
     with _TRANSFER_DEFICIT_CACHE_LOCK:
@@ -195,7 +269,7 @@ def _transfer_cache_set(key: tuple, value: dict) -> None:
                 _TRANSFER_DEFICIT_CACHE.pop(old_key, None)
 
 
-def _transfer_data_version(s: Session, plan_id: int, bom_path: str) -> tuple:
+def _transfer_data_version(s: Session, plan_id: int) -> tuple:
     op_row = s.execute(
         text("SELECT COALESCE(MAX(op_id),0) AS max_op_id, COUNT(*) AS cnt FROM schedule_ops WHERE plan_id=:pid"),
         {"pid": plan_id},
@@ -203,18 +277,34 @@ def _transfer_data_version(s: Session, plan_id: int, bom_path: str) -> tuple:
     stock_row = s.execute(
         text("SELECT COALESCE(MAX(id),0) AS max_snapshot_id, COALESCE(MAX(taken_at),'') AS max_taken_at FROM stock_snapshot")
     ).mappings().first() or {}
-    bom_mtime = 0
+    bom_version_id = _resolve_plan_bom_version_id(s, plan_id)
+    bom_row = {"max_bom_line_id": 0, "bom_line_count": 0}
     try:
-        if bom_path and os.path.exists(bom_path):
-            bom_mtime = int(os.path.getmtime(bom_path))
+        if bom_version_id is not None:
+            bom_row = s.execute(
+                text(
+                    """
+                    SELECT COALESCE(MAX(id),0) AS max_bom_line_id, COUNT(*) AS bom_line_count
+                    FROM bom_lines
+                    WHERE version_id = :vid
+                    """
+                ),
+                {"vid": int(bom_version_id)},
+            ).mappings().first() or bom_row
+        else:
+            bom_row = s.execute(
+                text("SELECT COALESCE(MAX(id),0) AS max_bom_line_id, COUNT(*) AS bom_line_count FROM bom")
+            ).mappings().first() or bom_row
     except Exception:
-        bom_mtime = 0
+        bom_row = {"max_bom_line_id": 0, "bom_line_count": 0}
     return (
         int(op_row.get("max_op_id") or 0),
         int(op_row.get("cnt") or 0),
         int(stock_row.get("max_snapshot_id") or 0),
         str(stock_row.get("max_taken_at") or ""),
-        bom_mtime,
+        int(bom_version_id or 0),
+        int(bom_row.get("max_bom_line_id") or 0),
+        int(bom_row.get("bom_line_count") or 0),
     )
 
 
@@ -302,6 +392,7 @@ class IngestRequest(BaseModel):
     bom: str
     plan: str
     stock: Optional[str] = None
+    receipts: Optional[str] = None
 
 class ExportRequest(BaseModel):
     out_path: str
@@ -353,6 +444,7 @@ def ingest_validate(req: IngestRequest):
         result = validate_files(req.machines, req.bom, req.plan)
         # Optional stock path validation (from request or previously set path)
         stock_path = req.stock or LAST_PATHS.get("stock")
+        receipts_path = req.receipts or LAST_PATHS.get("receipts")
         if stock_path:
             from ..scheduling.greedy.loaders import load_stock_any
             stock_info = {}
@@ -363,6 +455,16 @@ def ingest_validate(req: IngestRequest):
                 stock_info = {"stock_path": stock_path, "stock_error": str(e)}
             if isinstance(result, dict):
                 result.update(stock_info)
+        if receipts_path:
+            from ..scheduling.greedy.loaders import load_receipts_any
+            receipts_info = {}
+            try:
+                rdf = load_receipts_any(Path(receipts_path))
+                receipts_info = {"receipts_path": receipts_path, "receipts_rows": int(len(rdf))}
+            except Exception as e:
+                receipts_info = {"receipts_path": receipts_path, "receipts_error": str(e)}
+            if isinstance(result, dict):
+                result.update(receipts_info)
         return JSONResponse(content=any_to_jsonable(result))
     except Exception as e:
         tb = traceback.format_exc(limit=3)
@@ -377,6 +479,8 @@ def ingest(req: IngestRequest):
         LAST_PATHS.update({"machines": req.machines, "bom": req.bom, "plan": req.plan})
         if req.stock:
             LAST_PATHS.update({"stock": req.stock})
+        if req.receipts:
+            LAST_PATHS.update({"receipts": req.receipts})
         payload = {
             "status": "ok",
             "counts": {
@@ -395,7 +499,8 @@ def ingest(req: IngestRequest):
 async def upload_and_ingest(machines: UploadFile = File(...),
                             bom: UploadFile = File(...),
                             plan: UploadFile = File(...),
-                            stock: UploadFile | None = None):
+                            stock: UploadFile | None = File(default=None),
+                            receipts: UploadFile | None = File(default=None)):
     try:
         def _save(uf: UploadFile) -> str:
             ext = os.path.splitext(uf.filename or "")[1] or ".xlsx"
@@ -408,8 +513,11 @@ async def upload_and_ingest(machines: UploadFile = File(...),
         bpath = _save(bom)
         ppath = _save(plan)
         spath = None
+        rpath = None
         if stock is not None:
             spath = _save(stock)
+        if receipts is not None:
+            rpath = _save(receipts)
 
         with SessionLocal() as s:
             cnts = load_excels(s, mpath, bpath, ppath)
@@ -418,10 +526,14 @@ async def upload_and_ingest(machines: UploadFile = File(...),
         LAST_PATHS.update({"machines": mpath, "bom": bpath, "plan": ppath})
         if spath:
             LAST_PATHS.update({"stock": spath})
+        if rpath:
+            LAST_PATHS.update({"receipts": rpath})
+        else:
+            LAST_PATHS.update({"receipts": ""})
 
         payload = {
             "status": "ok",
-            "stored_paths": {"machines": mpath, "bom": bpath, "plan": ppath, "stock": spath},
+            "stored_paths": {"machines": mpath, "bom": bpath, "plan": ppath, "stock": spath, "receipts": rpath},
             "counts": {
                 "machines": int(cnts[0]) if len(cnts) > 0 else None,
                 "bom": int(cnts[1]) if len(cnts) > 1 else None,
@@ -443,7 +555,18 @@ def _ensure_plan_order_info_cols(db: Session) -> None:
     ensure_tables(db)
     try:
         cols = db.execute(text("PRAGMA table_info(plan_order_info)")).mappings().all()
-        names = {str(getattr(r, "name", r[1])) for r in cols}
+        def _col_name(row) -> str:
+            if isinstance(row, dict):
+                return str(row.get("name") or "")
+            try:
+                return str(row.get("name") or "")
+            except Exception:
+                pass
+            try:
+                return str(row[1])
+            except Exception:
+                return ""
+        names = {_col_name(r) for r in cols if _col_name(r)}
         def _add(col: str, ddl: str) -> None:
             if col not in names:
                 db.execute(text(f"ALTER TABLE plan_order_info ADD COLUMN {col} {ddl}"))
@@ -456,13 +579,14 @@ def _ensure_plan_order_info_cols(db: Session) -> None:
         _add("updated_at", "DATETIME")
         db.commit()
     except Exception:
+        logging.exception("Failed to ensure plan_order_info columns")
         db.rollback()
 
 
 
 # ================== Scheduling (Greedy) ==================
 @app.post("/schedule/greedy")
-def schedule_greedy(mode: str = ""):
+def schedule_greedy(mode: str = "", bom_version_id: int | None = None):
     """
     Запускает greedy-планировщик по LAST_PATHS и возвращает сводку:
       - out (xlsx), rows, min/max даты, preview,
@@ -472,6 +596,10 @@ def schedule_greedy(mode: str = ""):
     """
     try:
         with SessionLocal() as s:
+            bom_ver = get_resolved_bom_version(s, bom_version_id)
+            bom_df = bom_df_to_scheduler_df(get_version_rows_df(s, int(bom_ver.id)))
+            if bom_df.empty:
+                raise ValueError(f"BOM version {bom_ver.id} is empty or invalid for scheduling")
             out_file, sched = run_greedy(
                 s,
                 LAST_PATHS["plan"],
@@ -482,7 +610,9 @@ def schedule_greedy(mode: str = ""):
                 align_roots_to_due=True,      # JIT: корень "в due", дети назад
                 guard_limit_days=200 * 365,   # большой лимит (≈200 лет)
                 mode=mode,
-                stock_path=LAST_PATHS.get("stock")
+                stock_path=LAST_PATHS.get("stock"),
+                receipts_path=LAST_PATHS.get("receipts"),
+                bom_df=bom_df,
             )
 
             summary, hot = scan_bottlenecks(s)
@@ -509,6 +639,7 @@ def schedule_greedy(mode: str = ""):
         payload = {
             "status": "ok",
             "out": str(out_file),
+            "bom_version_id": int(bom_ver.id),
             "rows": rows_cnt,
             "min_date": min_date,
             "max_date": max_date,
@@ -713,6 +844,7 @@ def report_product_summary(plan_id: int, item_id: str = Query(..., description="
                         "status": plan.status,
                         "created_at": str(plan.created_at) if plan.created_at is not None else None,
                         "parent_plan_id": plan.parent_plan_id,
+                        "bom_version_id": plan.bom_version_id,
                     }
         except Exception:
             plan_meta = None
@@ -895,11 +1027,11 @@ def report_product_summary(plan_id: int, item_id: str = Query(..., description="
                     {"workshop": str(r.get("workshop") or ""), "qty": _to_float(r.get("qty"))} for r in stock_rows
                 ]
 
-            # Demand sources (parents)
-            try:
-                bom_rows = s.execute(text("SELECT item_id, component_id, qty_per FROM bom")).mappings().all()
-            except Exception:
-                bom_rows = []
+            # Demand sources (parents): BOM from plan version in DB (with legacy DB fallback only).
+            bom_df, _ = _load_plan_bom_df(s, plan_id)
+            bom_rows = []
+            if bom_df is not None and not bom_df.empty:
+                bom_rows = bom_df[["item_id", "component_id", "qty_per", "loss"]].to_dict("records")
             pair_map = {}
             def _skip_parent(parent: str, child: str) -> bool:
                 if not parent or not child:
@@ -917,52 +1049,14 @@ def report_product_summary(plan_id: int, item_id: str = Query(..., description="
                 qty_per = _to_float(br.get("qty_per"))
                 if qty_per <= 0:
                     qty_per = 1.0
+                loss = _to_float(br.get("loss"))
+                if loss <= 0:
+                    loss = 1.0
+                mult = float(qty_per) * float(loss)
                 key = (parent, child)
                 prev = pair_map.get(key)
-                if prev is None or qty_per > prev:
-                    pair_map[key] = qty_per
-            if not pair_map:
-                try:
-                    def _nc(v: str) -> str:
-                        return str(v).strip().lower().replace(" ", "").replace("_", "")
-                    bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
-                    if bom_path and os.path.exists(bom_path):
-                        bom_df = pd.read_excel(bom_path)
-                        cols = {_nc(c): c for c in bom_df.columns}
-                        def _pick(cands):
-                            for c in cands:
-                                key = _nc(c)
-                                if key in cols:
-                                    return cols[key]
-                            return None
-                        parent_col = _pick(["root article","rootarticle","parent","parent_item","parentitem","item_id","item","article"])
-                        comp_col = _pick(["article","item","item_id","component_id","component","child","rootarticle","root"])
-                        if parent_col == comp_col:
-                            comp_col = _pick(["article","item","component","component_id","child"])
-                        qty_col = _pick(["qty_per_parent","qtyperparent","qty_per","qtyper","qty","quantity","amount"])
-                        if parent_col and comp_col:
-                            tmp = bom_df[[parent_col, comp_col] + ([qty_col] if qty_col else [])].copy()
-                            tmp[parent_col] = tmp[parent_col].astype(str)
-                            tmp[comp_col] = tmp[comp_col].astype(str)
-                            if qty_col:
-                                tmp[qty_col] = pd.to_numeric(tmp[qty_col], errors="coerce").fillna(0.0)
-                            else:
-                                tmp[qty_col] = 1.0
-                            tmp = tmp[(tmp[parent_col] != "") & (tmp[comp_col] != "")]
-                            for _, r in tmp.iterrows():
-                                parent = _norm_item(r[parent_col])
-                                child = _norm_item(r[comp_col])
-                                if _skip_parent(parent, child):
-                                    continue
-                                q = _to_float(r[qty_col])
-                                if q <= 0:
-                                    q = 1.0
-                                key = (parent, child)
-                                prev = pair_map.get(key)
-                                if prev is None or q > prev:
-                                    pair_map[key] = q
-                except Exception:
-                    pass
+                if prev is None or mult > prev:
+                    pair_map[key] = mult
             parents_by_child = defaultdict(list)
             for (parent, child), qty in pair_map.items():
                 parents_by_child[child].append((parent, qty))
@@ -1039,7 +1133,7 @@ def report_product_summary(plan_id: int, item_id: str = Query(..., description="
                             "base_order_id": oid.split(":", 1)[0] if ":" in oid else oid,
                             "multiplier": mult,
                             "parent_qty": parent_qty,
-                            "required_qty": float(parent_qty * mult),
+                            "required_qty": float(np.ceil((parent_qty * mult) - 1e-9)),
                             "start_date": _date_str(m.get("start_date") or (ent.get("start_ts").date() if ent.get("start_ts") else None)),
                             "end_date": _date_str(m.get("end_date") or _end_date_from_ts(ent.get("end_ts"))),
                             "due_date": _date_str(m.get("due_date")),
@@ -1300,29 +1394,25 @@ def report_edges(plan_id: int, workshops: Optional[List[str]] = Query(default=No
         if not present:
             return {"status": "ok", "edges": []}
 
-        # BOM from file (LAST_PATHS), filtered by present items
-        try:
-            bom = pd.read_excel(LAST_PATHS["bom"], sheet_name=0, dtype=object)
-        except Exception:
+        with SessionLocal() as s:
+            bom_df, _ = _load_plan_bom_df(s, plan_id)
+        if bom_df is None or bom_df.empty:
             return {"status": "ok", "edges": []}
-
-        def nc(s):
-            return str(s).strip().lower().replace(" ", "").replace("_", "")
-
-        cols = {nc(c): c for c in bom.columns}
-        art = cols.get("article") or cols.get("item") or cols.get("item_id")
-        root = cols.get("rootarticle") or cols.get("root article")
-        if not art or not root:
+        pairs = set()
+        for r in bom_df[["item_id", "component_id"]].to_dict("records"):
+            child = _clean_item_id(r.get("item_id"))
+            parent = _clean_item_id(r.get("component_id"))
+            if not child or not parent or child == parent:
+                continue
+            if child not in present or parent not in present:
+                continue
+            pairs.add((parent, child))
+        if not pairs:
             return {"status": "ok", "edges": []}
-
-        pairs = bom[[art, root]].dropna().astype(str)
-        pairs = pairs[(pairs[art] != "") & (pairs[root] != "")]
-        pairs = pairs[(pairs[art].isin(present)) & (pairs[root].isin(present))]
         edges = []
         for base, items_in_base in base_map.items():
             # for each parent-child pair that both present in this base
-            for _, r in pairs.iterrows():
-                parent = str(r[root]); child = str(r[art])
+            for parent, child in pairs:
                 if parent in items_in_base and child in items_in_base:
                     edges.append({
                         "base_order_id": base,
@@ -1492,7 +1582,6 @@ def _compute_transfer_deficit(
 
     try:
         with SessionLocal() as s:
-            bom_path = LAST_PATHS.get("bom") or "BOM.xlsx"
             cache_key = (
                 int(plan_id),
                 tuple(sorted(item_filter)),
@@ -1500,7 +1589,7 @@ def _compute_transfer_deficit(
                 str(date_from or ""),
                 str(date_to or ""),
                 str(period or "day"),
-                _transfer_data_version(s, plan_id, bom_path),
+                _transfer_data_version(s, plan_id),
             )
             cached = _transfer_cache_get(cache_key)
             if cached is not None:
@@ -1601,79 +1690,32 @@ def _compute_transfer_deficit(
                 if bkey not in parent_by_base and not grp.empty:
                     parent_by_base[bkey] = grp.iloc[0]
 
-            bom_rows = s.execute(text("SELECT item_id, component_id, qty_per FROM bom")).mappings().all()
+            bom_df, _ = _load_plan_bom_df(s, plan_id)
             bom_map = {}
             bom_workshop_by_item: dict[str, str] = {}
-            for br in bom_rows:
-                # DB stores item_id as component (child), component_id as parent (see loader synonyms)
-                key = (str(br["component_id"]), str(br["item_id"]))
-                q = float(br.get("qty_per") or 0.0)
-                prev = bom_map.get(key)
-                if prev is None or q > prev:
-                    bom_map[key] = q
-            # Fallback: try BOM.xlsx to fill missing pairs
-            try:
-                def _nc(s: str) -> str:
-                    return str(s).strip().lower().replace(" ", "").replace("_", "")
-                def _clean_item(v) -> str:
-                    s = str(v).strip()
-                    if not s or s.lower() in ("nan", "none", "null"):
-                        return ""
-                    if s.endswith(".0"):
-                        s = s[:-2]
-                    return s
-                def _clean_workshop(v) -> str:
-                    s = str(v).strip()
-                    if not s or s.lower() in ("nan", "none", "null"):
-                        return ""
-                    if s.endswith(".0"):
-                        s = s[:-2]
-                    return s
-                if bom_path and os.path.exists(bom_path):
-                    bom_df = pd.read_excel(bom_path)
-                    cols = { _nc(c): c for c in bom_df.columns }
-                    def _pick(cands):
-                        for c in cands:
-                            key=_nc(c)
-                            if key in cols:
-                                return cols[key]
-                        return None
-                    parent_col = _pick(["root article","rootarticle","parent","parent_item","parentitem","item_id","item","article"])
-                    comp_col = _pick(["article","item","item_id","component_id","component","child","rootarticle","root"])
-                    if parent_col == comp_col:
-                        comp_col = _pick(["article","item","component","component_id","child"])
-                    qty_col = _pick(["qty_per_parent","qtyperparent","qty_per","qtyper","qty","quantity","amount"])
-                    wk_col = _pick(["workshop", "shop", "work_center", "workcenter", "workshop_id"])
-                    if parent_col and comp_col:
-                        src_cols = [parent_col, comp_col] + ([qty_col] if qty_col else []) + ([wk_col] if wk_col else [])
-                        tmp = bom_df[src_cols].copy()
-                        tmp[parent_col] = tmp[parent_col].map(_clean_item)
-                        tmp[comp_col] = tmp[comp_col].map(_clean_item)
-                        if wk_col:
-                            tmp[wk_col] = tmp[wk_col].map(_clean_workshop)
-                        if qty_col:
-                            tmp[qty_col] = pd.to_numeric(tmp[qty_col], errors="coerce").fillna(0.0)
-                        else:
-                            tmp[qty_col] = 1.0
-                        tmp = tmp[(tmp[parent_col]!="") & (tmp[comp_col]!="")]
-                        if wk_col:
-                            wtmp = tmp[(tmp[wk_col] != "")][[comp_col, wk_col]].copy()
-                            if not wtmp.empty:
-                                for iid, grp in wtmp.groupby(comp_col):
-                                    mode_vals = grp[wk_col].mode()
-                                    wk = mode_vals.iat[0] if not mode_vals.empty else grp[wk_col].iat[0]
-                                    if wk and str(iid) not in bom_workshop_by_item:
-                                        bom_workshop_by_item[str(iid)] = str(wk)
-                        for _, r in tmp.iterrows():
-                            par = r[parent_col]
-                            ch = r[comp_col]
-                            q = float(r[qty_col] or 0.0)
-                            key = (str(par), str(ch))
-                            prev = bom_map.get(key)
-                            if prev is None or q > prev:
-                                bom_map[key] = q
-            except Exception:
-                pass
+            if bom_df is not None and not bom_df.empty:
+                for br in bom_df[["item_id", "component_id", "qty_per", "loss", "workshop"]].to_dict("records"):
+                    child = _clean_item_id(br.get("item_id"))
+                    parent = _clean_item_id(br.get("component_id"))
+                    if not child or not parent or child == parent:
+                        continue
+                    q = float(br.get("qty_per") or 0.0)
+                    if q <= 0:
+                        q = 1.0
+                    loss = float(br.get("loss") or 1.0)
+                    if loss <= 0:
+                        loss = 1.0
+                    q *= loss
+                    key = (parent, child)
+                    prev = bom_map.get(key)
+                    if prev is None or q > prev:
+                        bom_map[key] = q
+                    wk = str(br.get("workshop") or "").strip()
+                    if wk and wk.lower() not in ("nan", "none", "null"):
+                        if wk.endswith(".0"):
+                            wk = wk[:-2]
+                        if wk and child not in bom_workshop_by_item:
+                            bom_workshop_by_item[child] = wk
             for iid, wk in bom_workshop_by_item.items():
                 if iid and wk and iid not in item_workshop:
                     item_workshop[iid] = wk

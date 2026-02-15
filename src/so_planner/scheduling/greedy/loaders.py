@@ -132,7 +132,7 @@ def load_bom(path: Path) -> pd.DataFrame:
     """Normalize BOM to a canonical schema.
 
     Returns columns: item_id, step, machine_id, time_per_unit (min),
-    setup_minutes (min), root_item_id, optional: workshop, qty_per_parent, article_name
+    setup_minutes (min), root_item_id, optional: workshop, qty_per_parent, loss, article_name
     """
     df = pd.read_excel(path, sheet_name=0, dtype=object)
     norm = {_norm_col(c): c for c in df.columns}
@@ -182,6 +182,11 @@ def load_bom(path: Path) -> pd.DataFrame:
             out["qty_per_parent"] = pd.to_numeric(df[qcol], errors="coerce").fillna(1.0).astype(float)
         else:
             out["qty_per_parent"] = 1.0
+        if has("loss"):
+            out["loss"] = pd.to_numeric(df[col("loss")], errors="coerce").fillna(1.0).astype(float)
+            out.loc[out["loss"] <= 0, "loss"] = 1.0
+        else:
+            out["loss"] = 1.0
         lag_col = None
         for cand in ("lag time", "lag_time", "lag", "lagdays", "lag day", "lag_days"):
             if has(cand):
@@ -197,6 +202,7 @@ def load_bom(path: Path) -> pd.DataFrame:
         ret_cols = ["item_id","step","machine_id","time_per_unit","setup_minutes","root_item_id"]
         if "workshop" in out.columns: ret_cols.append("workshop")
         if "qty_per_parent" in out.columns: ret_cols.append("qty_per_parent")
+        if "loss" in out.columns: ret_cols.append("loss")
         if "lag_days" in out.columns: ret_cols.append("lag_days")
         if "article_name" in out.columns: ret_cols.append("article_name")
         return out[ret_cols]
@@ -263,6 +269,12 @@ def load_bom(path: Path) -> pd.DataFrame:
         df["qty_per_parent"] = pd.to_numeric(df[key], errors="coerce").fillna(1.0).astype(float)
     else:
         df["qty_per_parent"] = 1.0
+    if _norm_col("loss") in norm:
+        lkey = norm[_norm_col("loss")]
+        df["loss"] = pd.to_numeric(df[lkey], errors="coerce").fillna(1.0).astype(float)
+        df.loc[df["loss"] <= 0, "loss"] = 1.0
+    else:
+        df["loss"] = 1.0
     lag_key = None
     for cand in ("lag time", "lag_time", "lag", "lagdays", "lag day", "lag_days"):
         if _norm_col(cand) in norm:
@@ -277,6 +289,7 @@ def load_bom(path: Path) -> pd.DataFrame:
     ret_cols = ["item_id","step","machine_id","time_per_unit","setup_minutes","root_item_id"]
     if "workshop" in df.columns: ret_cols.append("workshop")
     if "qty_per_parent" in df.columns: ret_cols.append("qty_per_parent")
+    if "loss" in df.columns: ret_cols.append("loss")
     if "lag_days" in df.columns: ret_cols.append("lag_days")
     if "article_name" in df.columns: ret_cols.append("article_name")
     return df[ret_cols]
@@ -400,4 +413,65 @@ def load_stock_any(path: Path) -> pd.DataFrame:
     return out
 
 
-__all__ = ["load_plan_of_sales", "load_bom", "load_bom_article_name_map", "load_machines", "load_stock_any"]
+def load_receipts_any(path: Path) -> pd.DataFrame:
+    """Read outgoing receipts Excel -> item_id, due_date, qty[, workshop].
+
+    Rows are preserved as-is (no aggregation) because each row must become a
+    separate planned order.
+    """
+    df = pd.read_excel(path, sheet_name=0, dtype=object)
+    norm = {_norm_col(c): c for c in df.columns}
+
+    item_col = None
+    for c in ("item_id", "item", "article", "артикул", "изделие"):
+        if _norm_col(c) in norm:
+            item_col = norm[_norm_col(c)]
+            break
+    if item_col is None:
+        raise ValueError("receipts: missing item_id-like column")
+
+    due_col = None
+    for c in ("due_date", "due", "date", "дата", "срок"):
+        if _norm_col(c) in norm:
+            due_col = norm[_norm_col(c)]
+            break
+    if due_col is None:
+        raise ValueError("receipts: missing due_date-like column")
+
+    qty_col = None
+    for c in ("qty", "quantity", "amount", "количество", "объем", "объём"):
+        if _norm_col(c) in norm:
+            qty_col = norm[_norm_col(c)]
+            break
+    if qty_col is None:
+        raise ValueError("receipts: missing qty-like column")
+
+    ws_col = None
+    for c in ("workshop", "shop", "цех", "участок"):
+        if _norm_col(c) in norm:
+            ws_col = norm[_norm_col(c)]
+            break
+
+    out = pd.DataFrame({
+        "item_id": df[item_col].astype(str).str.strip(),
+        "due_date": pd.to_datetime(df[due_col], errors="coerce").dt.date,
+        "qty": pd.to_numeric(df[qty_col], errors="coerce").fillna(0.0).astype(float),
+    })
+    if ws_col is not None:
+        out["workshop"] = df[ws_col].astype(str).fillna("").str.strip()
+    else:
+        out["workshop"] = ""
+
+    out = out[(out["item_id"] != "") & out["due_date"].notna() & (out["qty"] > 0)].copy()
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+
+__all__ = [
+    "load_plan_of_sales",
+    "load_bom",
+    "load_bom_article_name_map",
+    "load_machines",
+    "load_stock_any",
+    "load_receipts_any",
+]
